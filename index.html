@@ -1,0 +1,997 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>otimeleft </title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #0b0b0b;
+            font-family: 'Akkurat Mono', 'Courier New', Courier, monospace;
+            overflow: hidden;
+            height: 100vh;
+            width: 100vw;
+        }
+
+        /* ---------- 前置卷帘 (不变) ---------- */
+        .curtain {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: #1d1d1d;
+            z-index: 200;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            align-items: center;
+            transition: transform 0.9s cubic-bezier(0.8, 0, 0.2, 1);
+            transform: translateY(0);
+            box-shadow: 0 -20px 30px rgba(0,0,0,0.7);
+            border-bottom: 6px solid #d93f21;
+        }
+
+        .curtain.rolled {
+            transform: translateY(calc(150vh - 140px));
+        }
+
+        .curtain.rolled .curtain-content {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .curtain.rolled .grip-tab {
+            opacity: 1;
+            transform: translateY(-20px) scale(1);
+        }
+
+        .curtain-content {
+            width: 100%;
+            height: 100%;
+            background: #1d1d1d;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            transition: opacity 0.3s;
+            background-image: repeating-linear-gradient(45deg, #2b4f5c 0px, #2b4f5c 3px, #1a2e36 3px, #1a2e36 8px);
+            border: 8px double #c2915c;
+        }
+
+        .curtain-logo {
+            font-size: 12vw;
+            font-weight: 900;
+            color: #f2ede4;
+            text-shadow: 12px 12px 0 #d93f21, 18px 18px 0 #000;
+            letter-spacing: -4px;
+            transform: rotate(-3deg) skewX(-5deg);
+            margin-bottom: 30px;
+            font-family: 'Impact', sans-serif;
+        }
+
+        .pull-button {
+            background: #c2915c;
+            border: 5px solid #111;
+            padding: 25px 60px;
+            font-size: 42px;
+            font-weight: 900;
+            color: #000;
+            cursor: pointer;
+            box-shadow: 20px 20px 0 #2b4f5c, 0 0 0 4px #fff inset;
+            transform: rotate(1deg);
+            transition: all 0.2s;
+            font-family: 'Courier New', monospace;
+            letter-spacing: 6px;
+            margin-top: 50px;
+        }
+
+        .pull-button:hover {
+            background: #d93f21;
+            box-shadow: 10px 10px 0 #000, 0 0 0 4px #c2915c inset;
+            transform: rotate(-1deg) scale(1.02);
+            color: #fff;
+        }
+
+        .grip-tab {
+            position: absolute;
+            bottom: 0;
+            left: 50%;
+            transform: translateX(-50%) translateY(50%) scale(0.9);
+            background: #d93f21;
+            color: #111;
+            font-size: 28px;
+            font-weight: 900;
+            padding: 20px 50px;
+            border: 4px solid #fff;
+            border-bottom: none;
+            border-radius: 40px 40px 0 0;
+            letter-spacing: 6px;
+            box-shadow: 0 -10px 0 #000;
+            cursor: pointer;
+            transition: 0.2s;
+            opacity: 0;
+            pointer-events: none;
+            z-index: 250;
+            text-transform: uppercase;
+        }
+
+        .curtain.rolled .grip-tab {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .grip-tab:hover {
+            background: #fff;
+            color: #000;
+            padding-bottom: 30px;
+        }
+
+        /* ---------- 主网站：四屏 + 强烈分割引子 ---------- */
+        .main-site {
+            height: 100vh;
+            width: 100vw;
+            position: relative;
+            overflow: hidden;
+            background: #0b0b0b;
+            opacity: 0;
+            transition: opacity 0.5s ease 0.3s;
+            pointer-events: none;
+        }
+
+        .main-site.unlocked {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        /* 四象限滚动容器 */
+        .quadrant-container {
+            display: grid;
+            grid-template-columns: 50% 50%;
+            grid-template-rows: 50% 50%;
+            width: 200vw;
+            height: 200vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+            transition: transform 0.7s cubic-bezier(0.23, 1, 0.32, 1);
+            will-change: transform;
+        }
+
+        /* 每个象限 - 现在保留完整海报的底纹，但添加巨大裂口引子 */
+        .quadrant {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+            overflow: hidden;
+            background: #f2ede4;  /* 统一底纸 */
+        }
+
+        /* 让四个象限拼起来是一整张海报——但通过裂口和引子强化分割 */
+        .quadrant::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: radial-gradient(circle at 30% 40%, rgba(201,120,70,0.1) 0%, transparent 60%);
+            pointer-events: none;
+            z-index: 2;
+        }
+
+        /* 巨大的分割引线：每个象限的边缘带有撕裂/金属引子 */
+        .split-teaser {
+            position: absolute;
+            font-weight: 900;
+            color: #000;
+            background: #fff;
+            border: 4px solid #d93f21;
+            padding: 12px 24px;
+            font-size: 36px;
+            z-index: 60;
+            box-shadow: 12px 12px 0 #2b4f5c;
+            transform: rotate(-3deg);
+            letter-spacing: 4px;
+            white-space: nowrap;
+            pointer-events: none;
+            mix-blend-mode: hard-light;
+        }
+
+        /* 四个角落的引子文字 —— 明确"这是一块碎片" */
+        .teaser-tl { top: 20px; left: 20px; background: #c2915c; color: #000; border-color: #000; }
+        .teaser-tr { top: 20px; right: 20px; background: #2b4f5c; color: #fff; border-color: #d93f21; transform: rotate(2deg); }
+        .teaser-bl { bottom: 20px; left: 20px; background: #d93f21; color: #fff; border-color: #000; transform: rotate(-5deg); }
+        .teaser-br { bottom: 20px; right: 20px; background: #000; color: #f2ede4; border-color: #c2915c; transform: rotate(4deg); }
+
+        /* 每个象限的“引子”拨片 —— 可交互组件 */
+        .interact-panel {
+            position: absolute;
+            width: 90px;
+            height: 90px;
+            background: #d93f21;
+            border: 4px solid #111;
+            transform: rotate(15deg);
+            z-index: 100;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 8px 8px 0 #000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 44px;
+            font-weight: 900;
+            color: #fff;
+            text-shadow: 2px 2px 0 #000;
+        }
+
+        .interact-panel:hover {
+            transform: rotate(0deg) scale(1.2);
+            background: #fff;
+            color: #d93f21;
+            border-color: #d93f21;
+            box-shadow: 0 0 0 6px #000;
+        }
+
+        .panel-tl { top: 33%; left: 10%; }
+        .panel-tr { top: 11%; right: 15%; }
+        .panel-bl { bottom: 25%; left: 20%; }
+        .panel-br { bottom: 50%; right: 10%; }
+
+        /* 每个象限内放置完整海报元素，但刻意让它们跨越边界——被分割线截断，强化整体感 */
+        .full-poster-bg {
+            position: absolute;
+            top: -20px;
+            left: -30px;
+            width: calc(100% + 60px);
+            height: calc(100% + 40px);
+            background: #f2ede4;
+            z-index: 1;
+            opacity: 0.95;
+        }
+
+        /* 复用原几何块并让它们穿透边界 */
+        .struct-global {
+            position: absolute;
+            background: #c2915c;
+            width: 500px;
+            height: 500px;
+            top: -150px;
+            right: -200px;
+            transform: rotate(25deg);
+            border: 8px solid #201e1a;
+            z-index: 5;
+            mix-blend-mode: multiply;
+        }
+
+        .struct-global2 {
+            position: absolute;
+            background: #2b4f5c;
+            width: 600px;
+            height: 180px;
+            bottom: 100px;
+            left: -250px;
+            transform: skewX(-30deg) rotate(8deg);
+            border: 6px solid #000;
+            z-index: 5;
+            opacity: 0.8;
+        }
+
+        .struct-global3 {
+            position: absolute;
+            background: #d93f21;
+            width: 350px;
+            height: 350px;
+            bottom: 200px;
+            right: 50px;
+            transform: rotate(45deg) scaleX(0.8);
+            border: 10px double #111;
+            z-index: 5;
+        }
+
+        /* 大分割线 —— 十字交叉将四象限物理割开，但视觉上它们是一体的 */
+        .giant-split-x {
+            position: absolute;
+            top: 50%;
+            left: 0;
+            width: 100%;
+            height: 14px;
+            background: #000;
+            transform: translateY(-50%);
+            border-top: 6px solid #d93f21;
+            border-bottom: 6px solid #d93f21;
+            z-index: 80;
+            box-shadow: 0 0 0 4px #fff, 0 0 0 8px #000;
+            pointer-events: none;
+        }
+
+        .giant-split-y {
+            position: absolute;
+            top: 0;
+            left: 50%;
+            width: 14px;
+            height: 100%;
+            background: #000;
+            transform: translateX(-50%);
+            border-left: 6px solid #d93f21;
+            border-right: 6px solid #d93f21;
+            z-index: 80;
+            box-shadow: 0 0 0 4px #fff, 0 0 0 8px #000;
+            pointer-events: none;
+        }
+
+        /* 每个象限再添加自己的交互反馈区域 */
+        .quadrant {
+            outline: 4px solid rgba(0,0,0,0.2);
+            outline-offset: -4px;
+        }
+
+        /* 金属螺钉 (大量增加随性) */
+        .screw-many {
+            position: absolute;
+            width: 18px;
+            height: 18px;
+            background: #777;
+            border: 2px solid #111;
+            transform: rotate(45deg);
+            z-index: 70;
+            box-shadow: 0 0 0 2px #fff;
+        }
+
+        /* 随性构成元素：飘带、斜线、数字 */
+        .random-stripe {
+            position: absolute;
+            background: repeating-linear-gradient(45deg, #000, #000 10px, #fff 10px, #fff 20px);
+            width: 300px;
+            height: 30px;
+            transform: rotate(30deg);
+            border: 4px solid #d93f21;
+            z-index: 25;
+        }
+
+        .random-stripe2 {
+            background: repeating-linear-gradient(135deg, #2b4f5c, #2b4f5c 12px, #c2915c 12px, #c2915c 24px);
+            width: 500px;
+            height: 40px;
+            transform: rotate(-15deg);
+            border: 3px solid #000;
+        }
+
+        /* 导航提示 */
+        .nav-hint {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #000;
+            color: #fff;
+            padding: 12px 24px;
+            font-size: 24px;
+            border: 3px solid #d93f21;
+            z-index: 150;
+            font-weight: 900;
+            transform: skewX(-6deg);
+            box-shadow: 6px 6px 0 #c2915c;
+        }
+
+        /* 点击交互后弹出的临时信息 */
+        .interact-toast {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #000;
+            color: #fff;
+            font-size: 40px;
+            padding: 30px 60px;
+            border: 8px solid #d93f21;
+            z-index: 300;
+            display: none;
+            font-weight: 900;
+            text-align: center;
+            box-shadow: 30px 30px 0 #c2915c;
+            border-radius: 0;
+            letter-spacing: 4px;
+        }
+    </style>
+</head>
+<body>
+
+<!-- 前置卷帘 (同上) -->
+<div class="curtain" id="curtain">
+    <div class="curtain-content">
+        <div class="curtain-logo"><span>otimeleft</span></div>
+        <div style="font-size:38px; color:#f2ede4; margin:20px; background:#000; padding:10px 40px; border-left:20px solid #d93f21; transform:rotate(-1deg);">◉ otimeleft.cc ◉</div>
+        <div class="pull-button" id="unlockBtn">▼ PULL ▼</div>
+        <div style="position:absolute; bottom:30px; left:30px; color:#2b4f5c; font-size:px; background:#fff; padding:5px 15px; border:4px solid #000;">Репинский · Конструктивизм</div>
+    </div>
+</div>
+
+
+<div class="main-site" id="mainSite">
+
+
+
+    <!-- 四象限滚动容器 (内部包含完整海报的延伸，但被分割线裁切，形成整体裂开感) -->
+    <div class="quadrant-container" id="quadrantContainer">
+        <!-- 左上 Q1 (含有店名、官网的大部，但延伸到右上去) -->
+    <!-- 四个引子文字 (裂片标识) -->
+    <div class="split-teaser teaser-tl">           </div>
+    <div class="split-teaser teaser-tr"></div>
+    <div class="split-teaser teaser-bl"></div>
+    <div class="split-teaser teaser-br"></div>
+
+    <!-- 随性构成元素 (大量增加, 穿透各个象限) 这些元素会跨域，增强整体感 -->
+    <div class="random-stripe" style="top: 200px; left: 100px;"></div>
+    <div class="random-stripe" style="top: 70%; left: 60%; width: 400px; background: repeating-linear-gradient(45deg, #d93f21, #d93f21 15px, #000 15px, #000 30px);"></div>
+
+    <!-- 散布螺钉 -->
+    <div class="screw-many" style="top: 15%; left: 25%;"></div>
+    <div class="screw-many" style="top: 80%; left: 70%;"></div>
+    <div class="screw-many" style="top: 45%; left: 10%;"></div>
+    <div class="screw-many" style="top: 30%; right: 15%;"></div>
+    <div class="screw-many" style="bottom: 20%; left: 40%;"></div>
+    <div class="screw-many" style="bottom: 60%; right: 30%;"></div>
+        <div class="quadrant" id="q1">
+            <!-- 全局几何块穿透 (与整体一致) -->
+            <div class="struct-global"></div>
+            <div class="struct-global2"></div>
+            <div class="struct-global3"></div>
+            <!-- 内容: 店名巨大，冲出边界 -->
+            <div style="position: absolute; top: 80px; left: 60px; font-size: 130px; font-weight: 900; line-height: 0.8; text-shadow: 12px 12px 0 #c2915c; z-index: 30; color: #1b1b1b; transform: rotate(-1deg);">o<span style="background:#000; color:#f2ede4; padding:0 20px; border-right:10px solid #d93f21;">time</span>left</div>
+            <div style="position: absolute; top: 280px; left: 100px; font-size: 48px; background: #111; color: #e3dac9; padding: 8px 24px; border-left: 20px solid #d93f21; box-shadow: 18px 18px 0 #2b4f5c; z-index: 30; transform: rotate(-1deg);">◉ otimeleft.cc ◉</div>
+
+            <!-- 交互组件1: 拨片+点击反馈 -->
+            <div class="interact-panel panel-tl" data-quad="1">🐇</div>
+        </div>
+        <!-- 右上 Q2 (价格优惠、物联网方案) -->
+        <div class="quadrant" id="q2">
+            <div class="struct-global" style="top: -80px; left: -150px;"></div>
+            <div class="struct-global2" style="bottom: 50px; right: -300px;"></div>
+            <div style="position: absolute; top: 150px; right: 80px; background: #e8dbc6; border: 6px solid #000; padding: 40px; box-shadow: 25px 25px 0 #1a2e36; z-index: 30; transform: rotate(2deg);">
+                <div style="font-size: 60px; background: #fff; border: 4px solid #d93f21; padding: 10px; display: inline-block;">价格面议</div>
+                <div style="font-size: 40px; margin: 20px 0; background: #000; color:#fff; padding: 15px;">学生 -30%</div>
+            </div>
+            <div style="position: absolute; bottom: 200px; left: 50px; font-size: 60px; background: #2b4f5c; color:#fff; padding: 25px; border: 6px solid #000; transform: skewX(-8deg); box-shadow: 15px 15px 0 #000; z-index: 30;">物联网方案</div>
+            <div class="interact-panel panel-tr" data-quad="2"></div>
+        </div>
+        <!-- 左下 Q3 (文章指导、前端设计、行业报告) -->
+        <div class="quadrant" id="q3">
+            <div class="struct-global3" style="top: 50px; left: -30px;"></div>
+            <div style="position: absolute; bottom: 250px; left: 80px; display: flex; gap: 20px; border: 8px solid #000; background: #f2ede4; padding: 30px; z-index: 30; transform: rotate(-2deg);">
+                <div style="font-size:48px; border-left:12px solid #d93f21; background:#fff; padding:10px;">文章指导</div>
+                <div style="font-size:48px; background:#d93f21; color:#fff; padding:10px;">物联网</div>
+                <div style="font-size:48px; background:#000; color:#fff; padding:10px;">前端设计</div>
+            </div>
+            <div style="position: absolute; top: 200px; right: 30px; font-size: 70px; background: #c2915c; color: #000; padding: 25px 50px; border: 8px solid #111; transform: rotate(3deg); box-shadow: -20px 20px 0 #1f1f1f; z-index: 30;">行业报告</div>
+            <div class="interact-panel panel-bl" data-quad="3">✧</div>
+        </div>
+        <!-- 右下 Q4 (高效回复、24h、专业团队) -->
+        <div class="quadrant" id="q4">
+            <div class="struct-global2" style="top: 200px; right: -100px;"></div>
+            <div style="position: absolute; bottom: 150px; right: 80px; background: #fff; border-right: 20px solid #d93f21; border-left: 10px solid #2b4f5c; padding: 35px; transform: rotate(-2deg); box-shadow: 18px 18px 0 #000; z-index: 30;">
+                <span style="background:#000; color:#fff; font-size:48px; padding:8px;">otimeleft.cc</span>
+                <span style="font-size:70px; margin-left:20px;">tuz</span>
+            </div>
+            <div style="position: absolute; top: 150px; left: 40px; background: #fff; border: 6px solid; padding: 15px 30px; font-size: 50px; transform: rotate(8deg); box-shadow: -12px 12px 0 #2b4f5c;">24H ONLINE</div>
+            <div style="position: absolute; top: 400px; left: 200px; font-size: 45px; background: #000; color:#fff; padding:15px; border:4px solid #c2915c;">专业团队</div>
+            <div class="interact-panel panel-br" data-quad="4">⌘</div>
+        </div>
+    </div>
+
+    <!-- 交互提示浮层 -->
+    <div class="nav-hint">←  ↕ →</div>
+</div>
+
+<!-- 全局toast (交互反馈) -->
+<div class="interact-toast" id="globalToast">⚡ 裂片激活 ⚡</div>
+
+<script>
+(function() {
+    // ==================== 反开发者工具混淆层 ====================
+
+    // 1. 检测开发者工具打开（基于debugger性能检测）
+    let devToolsOpen = false;
+    const devToolsCheckInterval = setInterval(() => {
+        const start = performance.now();
+        debugger; // 如果开发者工具打开，这里会暂停导致时间显著变长
+        const end = performance.now();
+        if (end - start > 100) {
+            if (!devToolsOpen) {
+                devToolsOpen = true;
+                triggerDevToolsAction('open');
+            }
+        } else {
+            if (devToolsOpen) {
+                devToolsOpen = false;
+                triggerDevToolsAction('close');
+            }
+        }
+    }, 1000);
+
+    // 2. 检测控制台输出/函数重写
+    const originalConsole = {
+        log: console.log,
+        info: console.info,
+        warn: console.warn,
+        error: console.error,
+        dir: console.dir,
+        table: console.table
+    };
+
+    // 重写console方法，返回混淆数据
+    Object.keys(originalConsole).forEach(method => {
+        console[method] = function(...args) {
+            // 如果是开发者自己用console，可以通过某个标记跳过
+            if (window.__DEV_MODE__) {
+                originalConsole[method].apply(console, args);
+                return;
+            }
+
+            // 返回随机混淆数据
+            const fakeData = generateFakeData();
+            originalConsole[method].call(console,
+                '%c[HACKASAT PROTECTED]',
+                'color: #d93f21; font-weight: bold;',
+                ...args,
+                '\n↳ 实际返回:', fakeData
+            );
+            return fakeData;
+        };
+    });
+
+    // 3. 检测DOM断点/元素审查
+    const elementCheckInterval = setInterval(() => {
+        // 检测元素属性是否被修改（通过比较快照）
+        const criticalElements = [
+            { id: 'curtain', props: ['className'] },
+            { id: 'mainSite', props: ['className'] },
+            { class: 'interact-panel', props: ['innerHTML', 'onclick'] }
+        ];
+
+        checkElementIntegrity(criticalElements);
+    }, 2000);
+
+    // 4. 右键菜单劫持 + 显示假菜单
+    document.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showFakeContextMenu(e.clientX, e.clientY);
+    });
+
+    // 5. 检测键盘快捷键（F12, Ctrl+Shift+I, Ctrl+Shift+J, Ctrl+U）
+    document.addEventListener('keydown', (e) => {
+        // F12
+        if (e.key === 'F12') {
+            e.preventDefault();
+            triggerAntiDebug();
+        }
+
+        // Ctrl+Shift+I / Ctrl+Shift+J
+        if (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'J')) {
+            e.preventDefault();
+            triggerAntiDebug();
+        }
+
+        // Ctrl+U (查看源码)
+        if (e.ctrlKey && e.key === 'u') {
+            e.preventDefault();
+            showFakeSource();
+        }
+
+        // Ctrl+Shift+C (检查元素)
+        if (e.ctrlKey && e.shiftKey && e.key === 'C') {
+            e.preventDefault();
+            showFakeInspector();
+        }
+    });
+
+    // 6. 检测窗口大小变化（开发者工具独立窗口常见）
+    let lastWidth = window.innerWidth;
+    let lastHeight = window.innerHeight;
+
+    window.addEventListener('resize', () => {
+        const widthDiff = Math.abs(window.innerWidth - lastWidth);
+        const heightDiff = Math.abs(window.innerHeight - lastHeight);
+
+        // 如果变化量很小且不成比例，可能是开发者工具打开了
+        if ((widthDiff < 50 && heightDiff > 100) ||
+            (heightDiff < 50 && widthDiff > 100)) {
+            triggerDevToolsAction('resize-detected');
+        }
+
+        lastWidth = window.innerWidth;
+        lastHeight = window.innerHeight;
+    });
+
+    // 7. 检测Function.toString监控
+    const originalToString = Function.prototype.toString;
+    Function.prototype.toString = function() {
+        const funcName = this.name;
+        // 如果是敏感函数，返回混淆信息
+        if (['unlockSite', 'updateTransform', 'checkElementIntegrity'].includes(funcName)) {
+            return 'function ' + funcName + '() { [native code] }';
+        }
+        return originalToString.call(this);
+    };
+
+    // 8. 动态重命名/混淆关键变量
+    const keyMap = new WeakMap();
+    const obfuscateKey = (obj, key) => {
+        const fakeKey = '_' + Math.random().toString(36).substr(2, 9);
+        keyMap.set(obj, { [fakeKey]: obj[key] });
+        Object.defineProperty(obj, fakeKey, {
+            get: () => keyMap.get(obj)[fakeKey],
+            set: (val) => { keyMap.get(obj)[fakeKey] = val; }
+        });
+        return fakeKey;
+    };
+
+    // ==================== 辅助函数 ====================
+
+    function generateFakeData() {
+        const fakePatterns = [
+            { flag: 'flag{this_is_not_real}' },
+            { key: '0x7e6d6f6f6e' },
+            [ '0xdead', '0xbeef', '0xcafe' ],
+            '{ encrypted: true, data: "..." }'
+        ];
+        return fakePatterns[Math.floor(Math.random() * fakePatterns.length)];
+    }
+
+    function triggerDevToolsAction(action) {
+        // 混淆DOM结构
+        document.body.style.filter = 'blur(3px)';
+
+        // 显示假toast
+        const fakeToast = document.createElement('div');
+        fakeToast.style.cssText = `
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #000;
+            color: #d93f21;
+            padding: 20px;
+            border: 4px solid #d93f21;
+            z-index: 10000;
+            font-family: monospace;
+            font-size: 24px;
+        `;
+        fakeToast.innerHTML = '🔒 DEVTOOLS DETECTED<br>ACTIVATING DECOY PROTOCOL';
+        document.body.appendChild(fakeToast);
+
+        setTimeout(() => {
+            fakeToast.remove();
+            document.body.style.filter = '';
+        }, 2000);
+
+        // 随机交换一些元素的内容
+        scrambleContent();
+    }
+
+    function triggerAntiDebug() {
+        // 无限debugger
+        const interval = setInterval(() => {
+            debugger;
+        }, 100);
+
+        // 显示警告
+        alert('>.o');
+
+        setTimeout(() => clearInterval(interval), 5000);
+    }
+
+    function showFakeContextMenu(x, y) {
+        const menu = document.createElement('div');
+        menu.style.cssText = `
+            position: fixed;
+            top: ${y}px;
+            left: ${x}px;
+            background: #1d1d1d;
+            border: 3px solid #d93f21;
+            padding: 10px 0;
+            z-index: 10001;
+            font-family: 'Courier New', monospace;
+            min-width: 200px;
+            box-shadow: 10px 10px 0 #000;
+        `;
+
+        const items = [
+            '🔒 Inspect (locked)',
+            '🔒 View Source (encrypted)',
+            '🔒 Save As... (decoy)',
+            '🔒 Print (jammed)',
+            '---',
+            '⚡ HackASat CTF 2024'
+        ];
+
+        items.forEach(item => {
+            if (item === '---') {
+                menu.appendChild(document.createElement('hr'));
+            } else {
+                const div = document.createElement('div');
+                div.style.cssText = `
+                    padding: 8px 20px;
+                    color: ${item.includes('🔒') ? '#666' : '#d93f21'};
+                    cursor: ${item.includes('🔒') ? 'not-allowed' : 'pointer'};
+                    border-left: 4px solid transparent;
+                `;
+                div.textContent = item;
+                div.onmouseover = () => {
+                    div.style.background = '#333';
+                    div.style.borderLeftColor = '#d93f21';
+                };
+                div.onmouseout = () => {
+                    div.style.background = '';
+                    div.style.borderLeftColor = 'transparent';
+                };
+                if (!item.includes('🔒')) {
+                    div.onclick = () => {
+                        alert('🚀 Welcome to HackASat 2024 Training!\nFlag is hidden in plain sight...');
+                        menu.remove();
+                    };
+                }
+                menu.appendChild(div);
+            }
+        });
+
+        document.body.appendChild(menu);
+
+        // 点击其他地方关闭
+        setTimeout(() => {
+            document.addEventListener('click', function closeMenu() {
+                menu.remove();
+                document.removeEventListener('click', closeMenu);
+            });
+        }, 100);
+    }
+
+    function showFakeSource() {
+        const fakeSource = `
+<!-- HackASat 2024 - Training Grounds -->
+<!-- This is NOT the real source -->
+<!-- Real content is XOR encrypted in memory -->
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DECOY - NOT REAL</title>
+    <meta name="flag" content="flag{this_is_a_decoy}">
+</head>
+<body>
+    <div class="fake-content">
+        <!-- You won't find anything here -->
+        <!-- Try harder ;) -->
+    </div>
+</body>
+</html>`;
+
+        const newWindow = window.open('about:blank');
+        newWindow.document.write(fakeSource);
+    }
+
+    function showFakeInspector() {
+        alert('>-0');
+        console.log('%c🔍 Inspecting...', 'color: #d93f21', {
+            element: 'div.honeypot',
+            classes: ['decoy', 'trap'],
+            attributes: {
+                'data-flag': 'flag{not_here}',
+                'style': 'display: none'
+            }
+        });
+    }
+
+    function scrambleContent() {
+        // 随机交换一些拨片的位置
+        const panels = document.querySelectorAll('.interact-panel');
+        if (panels.length >= 2) {
+            const tempHTML = panels[0].innerHTML;
+            panels[0].innerHTML = panels[1].innerHTML;
+            panels[1].innerHTML = tempHTML;
+
+            const tempQuad = panels[0].getAttribute('data-quad');
+            panels[0].setAttribute('data-quad', panels[1].getAttribute('data-quad'));
+            panels[1].setAttribute('data-quad', tempQuad);
+        }
+    }
+
+    function checkElementIntegrity(elements) {
+        // 这里可以添加元素完整性检查逻辑
+        // 如果发现被修改，触发反击
+    }
+
+    // 9. 隐藏真实函数名（通过IIFE包装）
+    const hiddenFunctions = {
+        realUnlock: unlockSite,
+        realUpdate: updateTransform
+    };
+
+    // 重写函数名
+    window.unlockSite = function() {
+        // 调用前检查环境
+        if (devToolsOpen) {
+            showFakeToast('🔒 Unlock blocked - devtools detected');
+            return;
+        }
+        hiddenFunctions.realUnlock();
+    };
+
+    // 10. 添加蜜罐元素
+    function addHoneypotElements() {
+        const honeypot = document.createElement('div');
+        honeypot.style.cssText = 'display: none;';
+        honeypot.setAttribute('data-flag', 'flag{this_is_a_trap}');
+        honeypot.setAttribute('data-clue', 'base64:ZmFrZV9jbHVl');
+        document.body.appendChild(honeypot);
+
+        // 在控制台输出假的线索
+        console.log('%c[DEBUG] Found hidden element:', 'color: #00ff00', honeypot);
+    }
+
+    // 初始化蜜罐
+    addHoneypotElements();
+
+    // ==================== 原始代码保留 ====================
+    // 你的原有代码保持不变，但函数名可能被重写
+
+    const curtain = document.getElementById('curtain');
+    const mainSite = document.getElementById('mainSite');
+    const unlockBtn = document.getElementById('unlockBtn');
+    const gripTab = document.getElementById('gripTab');
+    const container = document.getElementById('quadrantContainer');
+    const toast = document.getElementById('globalToast');
+
+    let currentView = 0;
+    const positions = [
+        { x: 0, y: 0 },
+        { x: -100, y: 0 },
+        { x: 0, y: -100 },
+        { x: -100, y: -100 }
+    ];
+
+    function updateTransform(index) {
+        const pos = positions[index];
+        container.style.transform = `translate(${pos.x}vw, ${pos.y}vh)`;
+    }
+
+    // 键盘导航 - 包装一层以检查
+    window.addEventListener('keydown', (e) => {
+        if (devToolsOpen) {
+            e.preventDefault();
+            return;
+        }
+        if (!mainSite.classList.contains('unlocked')) return;
+        if (e.key.startsWith('Arrow')) e.preventDefault();
+        let next = currentView;
+        if (e.key === 'ArrowRight' && currentView === 0) next = 1;
+        else if (e.key === 'ArrowLeft' && currentView === 1) next = 0;
+        else if (e.key === 'ArrowDown' && currentView === 0) next = 2;
+        else if (e.key === 'ArrowUp' && currentView === 2) next = 0;
+        else if (e.key === 'ArrowDown' && currentView === 1) next = 3;
+        else if (e.key === 'ArrowUp' && currentView === 3) next = 1;
+        else if (e.key === 'ArrowRight' && currentView === 2) next = 3;
+        else if (e.key === 'ArrowLeft' && currentView === 3) next = 2;
+        if (next !== currentView) {
+            currentView = next;
+            updateTransform(currentView);
+        }
+    });
+
+    // 触摸滑动
+    let touchStartX, touchStartY;
+    window.addEventListener('touchstart', (e) => {
+        if (devToolsOpen) return;
+        if (!mainSite.classList.contains('unlocked')) return;
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+    }, {passive: false});
+
+    window.addEventListener('touchend', (e) => {
+        if (devToolsOpen) return;
+        if (!mainSite.classList.contains('unlocked') || touchStartX === undefined) return;
+        const dx = e.changedTouches[0].clientX - touchStartX;
+        const dy = e.changedTouches[0].clientY - touchStartY;
+        const absX = Math.abs(dx);
+        const absY = Math.abs(dy);
+        if (Math.max(absX, absY) < 30) return;
+
+        let next = currentView;
+        if (absX > absY) {
+            if (dx > 0 && currentView === 1) next = 0;
+            else if (dx < 0 && currentView === 0) next = 1;
+            else if (dx > 0 && currentView === 3) next = 2;
+            else if (dx < 0 && currentView === 2) next = 3;
+        } else {
+            if (dy > 0 && currentView === 2) next = 0;
+            else if (dy < 0 && currentView === 0) next = 2;
+            else if (dy > 0 && currentView === 3) next = 1;
+            else if (dy < 0 && currentView === 1) next = 3;
+        }
+        if (next !== currentView) {
+            currentView = next;
+            updateTransform(currentView);
+        }
+    }, {passive: false});
+
+    // 解锁 - 使用隐藏函数
+    function unlockSite() {
+        if (devToolsOpen) {
+            showFakeToast('🔒 Anti-debug active');
+            return;
+        }
+        curtain.classList.add('rolled');
+        mainSite.classList.add('unlocked');
+        currentView = 0;
+        updateTransform(0);
+    }
+
+    unlockBtn.addEventListener('click', unlockSite);
+    gripTab.addEventListener('click', () => {
+        if (curtain.classList.contains('rolled')) {
+            curtain.classList.remove('rolled');
+            mainSite.classList.remove('unlocked');
+        }
+    });
+
+    // 交互组件: 点击每个象限的拨片显示toast
+    const panels = document.querySelectorAll('.interact-panel');
+    panels.forEach(p => {
+        p.addEventListener('click', (e) => {
+            if (devToolsOpen) {
+                showFakeToast('🕵️ Monitoring detected');
+                return;
+            }
+            const quad = e.target.getAttribute('data-quad');
+            toast.style.display = 'flex';
+            toast.innerHTML = `裂片 ${quad} 激活 ⚡<br> <span style="font-size:28px;">otimeleft.cc</span>`;
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 1200);
+        });
+    });
+
+    updateTransform(0);
+
+    // 额外随性：双击空白也出彩蛋
+    document.querySelectorAll('.quadrant').forEach(q => {
+        q.addEventListener('dblclick', (e) => {
+            if (devToolsOpen) return;
+            toast.style.display = 'flex';
+            toast.innerHTML = `⚡ 结构主义裂片 ⚡ <br> ◉ otimeleft.cc`;
+            setTimeout(() => {
+                toast.style.display = 'none';
+            }, 1000);
+        });
+    });
+
+    // 辅助显示假toast
+    function showFakeToast(message) {
+        const fakeToast = document.createElement('div');
+        fakeToast.style.cssText = `
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: #000;
+            color: #d93f21;
+            padding: 20px 40px;
+            border: 4px solid #d93f21;
+            z-index: 10000;
+            font-family: 'Courier New', monospace;
+            font-size: 24px;
+            box-shadow: 15px 15px 0 #000;
+        `;
+        fakeToast.textContent = message;
+        document.body.appendChild(fakeToast);
+        setTimeout(() => fakeToast.remove(), 1500);
+    }
+})();
+
+</script>
+</body>
+</html>
