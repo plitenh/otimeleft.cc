@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>内容管理 · CV Editor</title>
+    <link rel="stylesheet" href="assets/css/site.css" />
+    <link rel="stylesheet" href="assets/css/admin.css" />
+  </head>
+  <body class="admin-body">
+    <div class="admin-shell">
+      <header class="admin-topbar">
+        <div>
+          <strong>CV Editor · Admin</strong>
+          <span id="admin-store-hint"></span>
+        </div>
+        <div class="admin-topbar__actions">
+          <a class="btn" href="index.html">返回站点</a>
+          <button type="button" class="btn" id="admin-import-json">导入 JSON</button>
+          <input type="file" id="admin-import-file" accept=".json,application/json" hidden />
+          <button type="button" class="btn" id="admin-export-json">导出 JSON</button>
+          <button type="button" class="btn" id="admin-reset">恢复默认</button>
+          <button type="button" class="btn btn--primary" id="admin-save">保存</button>
+        </div>
+      </header>
+      <div class="admin-layout">
+        <nav class="admin-nav" id="admin-nav"></nav>
+        <main class="admin-main" id="admin-main"></main>
+      </div>
+    </div>
+    <div class="admin-modal" id="admin-modal" hidden>
+      <div class="admin-modal__backdrop" data-close></div>
+      <div class="admin-modal__panel">
+        <header class="admin-modal__head">
+          <h2 id="admin-modal-title"></h2>
+          <button type="button" class="admin-modal__close" data-close aria-label="Close">×</button>
+        </header>
+        <form id="admin-modal-form" class="admin-modal__body"></form>
+        <footer class="admin-modal__foot">
+          <button type="button" class="btn" data-close>取消</button>
+          <button type="button" class="btn btn--primary" id="admin-modal-submit">保存</button>
+        </footer>
+      </div>
+    </div>
+    <script src="assets/js/registry.js"></script>
+    <script src="assets/js/store.js"></script>
+    <script src="assets/js/data.js"></script>
+    <script src="assets/js/entries.js"></script>
+    <script src="assets/js/admin.js"></script>
+  </body>
+</html>
