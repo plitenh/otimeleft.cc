@@ -136,8 +136,7 @@
         <div class="guide-banner__inner">
           <h2>${esc(t("Getting started", "使用引导"))}</h2>
           <ol class="guide-steps">
-            <li>${esc(t("Edit name & contact in", "改姓名与联系方式："))} <code>assets/js/data.js</code></li>
-            <li>${esc(t("Add content in", "添加经历："))} <a href="admin.html"><strong>admin.html</strong></a> ${esc(t("(save to browser)", "（保存到浏览器）"))}</li>
+            <li>${esc(t("Add content in", "修改博客和简历的全部内容主要通过导入json完成："))} <a href="admin.html"><strong>跳转到otimeleft.cc/admin.html</strong></a> ${esc(t("(save to browser)", "（导入并保存到浏览器）"))}</li>
             <li>${esc(t("Pick modules & export PDF on", "勾选模块并导出："))} <a href="resume.html">resume.html</a></li>
           </ol>
           <p class="guide-note">${esc(
