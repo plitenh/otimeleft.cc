@@ -6,6 +6,7 @@ window.PORTFOLIO_CATALOG = {
     { id: "nix", label: "Nix", labelEn: "Nix" },
     { id: "fanet", label: "FANET", labelEn: "FANET" },
     { id: "paper", label: "论文阅读", labelEn: "Papers" },
+    { id: "llm-safety", label: "大模型安全", labelEn: "LLM Safety" },
   ],
 
   posts: [
@@ -182,7 +183,20 @@ window.PORTFOLIO_CATALOG = {
       files: [
         { label: "PDF", href: "assets/library/papers/fanet/Real_Time_Surveillance.pdf" },
       ],
-    },  ],
+    },
+    {
+      id: "neurips2026-internal-safety-collapse",
+      category: "llm-safety",
+      title: "[NeurIPS 2026] Safety failures in coding agents and frontier LLMs",
+      titleEn: "Internal Safety Collapse in LLMs and Coding Agents",
+      summary:
+        "研究 coding agent 为完成任务而在良性任务中生成不安全内容的 Internal Safety Collapse，并验证前沿 LLM 仍存在内部安全坍塌。",
+      tags: ["LLM safety", "NeurIPS 2026", "coding agents"],
+      files: [
+        { label: "PDF", href: "assets/library/papers/llm-safety/NeurIPS2026_Internal_Safety_Collapse.pdf" },
+      ],
+    },
+  ],
 
   repos: [
     {
