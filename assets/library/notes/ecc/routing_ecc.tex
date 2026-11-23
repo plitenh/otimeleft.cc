@@ -1,0 +1,440 @@
+\documentclass[UTF8,a4paper,11pt,fontset=fandol]{ctexart}
+
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,array,tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!45!black,
+  urlcolor=blue!55!black
+}
+\setlist{itemsep=0.35em,topsep=0.35em}
+\renewcommand{\arraystretch}{1.25}
+\setlength{\emergencystretch}{1.5em}
+\newcommand{\code}[1]{\nolinkurl{#1}}
+
+\title{ECOS Chip Compiler 中的布线\\项目结构、GCD 示例与 Signoff 证据}
+\author{基于 ECC 仓库与 ENICS Digital VLSI Design 第 9 讲}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本文中的 ECC 指 ECOS Chip Compiler，而不是纠错码。文章承接同目录的 CTS 文档，以仓库中的 GCD 示例为对象，说明布线在 RTL-to-GDS 流程中的位置、pin access、global routing、track assignment 和 detailed routing 的分工，以及 maze routing、Steiner tree、拥塞、DRC、寄生参数和信号完整性之间的关系。项目部分依据 iRT 源码说明、ECC 配置、QoR 指标和 CI 流水定义，不虚构某次运行的实测结果。最后区分人工评审清单与程序生成的 signoff checklist，并说明当前 Routing checklist 代码的实际执行边界。
+\end{abstract}
+
+\tableofcontents
+
+\section{文档范围与项目结构}
+
+ECOS Chip Compiler 集成 Yosys、ECC-DreamPlace、ECC-Tools 等工具形成 RTL-to-GDS 流程。Routing 的任务不是重新安排标准单元位置，也不是修改 GCD 算法，而是在既定布局、时钟树和工艺规则上，把网表中的逻辑连接变成实际的金属线与通孔。
+
+除特别说明外，本文中的文件路径均相对于：
+\begin{center}
+\path{/home/kernel_dev/w/ecc}
+\end{center}
+
+与 Routing 直接相关的主要文件如下。
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.47\textwidth}X}
+\toprule
+文件 & 作用 \\
+\midrule
+\path{docs/examples/gcd/gcd.v} & GCD 示例 RTL，说明需要互连的控制器、数据通路和寄存器 \\
+\path{docs/examples/gcd/ics55flow.py} & GCD 流程示例，给出 CTS、Legalization、Routing 的先后关系 \\
+\path{chipcompiler/rtl2gds/builder.py} & 完整 RTL-to-GDS 流程编排 \\
+\path{chipcompiler/thirdparty/ecc-tools/src/operation/iRT/README.md} & iRT 模块划分、Flute 和三维 A* 搜索说明 \\
+\path{chipcompiler/tools/ecc/configs/route_ecc.json} & Router 配置模板 \\
+\path{chipcompiler/docs/ecc-config-ref.en.md} & GCD 布线层示例和参数语义 \\
+\path{chipcompiler/tools/ecc/metrics.py} & Routing 原始 QoR 指标名称 \\
+\path{chipcompiler/tools/ecc/checklist.py} & 步骤 checklist 入口及保留的旧详细检查代码 \\
+\path{chipcompiler/tools/ecc/signoff_checklist.py} & 当前输出证据快照和全局 checklist 聚合 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+本文使用 ENICS 第 9 讲的主题组织原理，但不是逐页翻译课件。课程页将第 9 讲分为 9a Routing、9b--9c Maze Routing、9d Routing in Practice、9e Signal Integrity and DFM。项目结论以本地 ECC 源码为准。
+
+\section{Routing 在 ECC/GCD 流程中的位置}
+
+\subsection{前后步骤}
+
+GCD 简化示例按以下顺序注册步骤：
+\begin{verbatim}
+Synthesis -> PreFloorplan -> MacroPlacement -> PostFloorplan
+-> Placement -> CTS -> Legalization -> Routing -> Filler
+\end{verbatim}
+见 \path{docs/examples/gcd/ics55flow.py}:77--93。
+
+完整 builder 的关键先后关系为：
+\[
+\text{CTS}\rightarrow\text{Legalization}\rightarrow\text{Routing}
+\rightarrow\text{Filler}\rightarrow\text{LVS/DRC}
+\rightarrow\text{RCX}\rightarrow\text{STA}.
+\]
+其中还包含 Antenna Check、Post-route LEC、功耗、EMIR 和 Harden 等步骤，见 \path{chipcompiler/rtl2gds/builder.py}:100--130。
+
+这一顺序说明：
+\begin{enumerate}
+  \item Placement 决定单元位置，CTS 插入时钟缓冲并形成时钟分支，Routing 使用这些物理结果；
+  \item Legalization 保证单元位置合法，避免在非法布局上构造最终互连；
+  \item Filler 位于 Routing 之后，不能把 filler 单元误认为需要提前布信号线的功能单元；
+  \item Routing 的内部诊断不是最终签核，后续仍需独立 DRC/LVS、RCX 和 STA。
+\end{enumerate}
+
+\subsection{GCD 中真正需要连接的对象}
+
+GCD 顶层具有单一 \code{clk}、同步 active-high 的 \code{reset}、请求/响应端口，以及共用同一时钟的控制器和数据通路。FSM 有 2 个状态位，A、B 寄存器各 16 位，共 34 个 clock sinks。见 \path{docs/examples/gcd/gcd.v}:11--21、37--98、109--160、192--223、369--540。
+
+数据通路可概括为：
+\begin{verbatim}
+A/B registers -> subtract/compare -> mux/select/enable -> A/B registers
+       |                                                       |
+       +---------------- same clk domain ----------------------+
+\end{verbatim}
+
+因此 Router 面对的不只是 \code{clk}：
+\begin{itemize}
+  \item CTS 形成的时钟 buffer 和 34 个 CK sinks 之间的时钟互连；
+  \item FSM 状态寄存器、控制器输出和数据通路控制信号；
+  \item A/B 寄存器、减法器、比较器、mux 和 enable 反馈路径；
+  \item 同步复位和 request/response 接口 nets。
+\end{itemize}
+
+设计中还存在电源地等物理网络，但它们由相应的 PDN/物理实现步骤处理，不能与普通信号 Router 的职责混为一谈。
+
+\textbf{34 是 clock sinks 数量，不是全设计的 net 数量。}也不能因为 GCD 是迭代电路，就推断其某处必然是布线拥塞热点；是否存在热点必须由当前版图和报告证明。该 RTL 没有 SRAM 或其他 hard macro，通用 Router 能处理 macro pins 并不意味着本示例中存在宏。
+
+\subsection{一般信号与 Clock Routing 的关系}
+
+CTS 文档中的 \code{routing_layer=[4,5]} 表示时钟树使用 MET4--MET5；GCD 的一般 Routing 示例配置为 MET2--MET5。两者作用域不同，并不矛盾。
+
+CTS 阶段得到的 skew、latency 和估计线长不能替代最终几何布线。真实走线、通孔和相邻网络会改变寄生电阻、电容及耦合，因此最终时序必须在 post-route RCX/STA 中重新建立。
+
+\section{布线问题的图模型与优化目标}
+
+\subsection{三维布线图}
+
+可把布线资源抽象为三维图 $G=(V,E)$：
+\begin{itemize}
+  \item 节点表示某一金属层上的 GCell、track 位置或可访问点；
+  \item 层内边表示沿金属track的走线资源；
+  \item 层间边表示 via 资源；
+  \item pin、blockage、设计规则和既有走线会限制可用节点与边。
+\end{itemize}
+
+Global routing 通常在较粗的 GCell 图上工作，detailed routing 则使用更精细的三维 track grid。粗图用于快速分配路径和发现拥塞，细图用于形成满足几何规则的实际形状。
+
+对边 $e$，令容量为 $c(e)$、需求为 $d(e)$，则常用溢出定义为：
+\[
+  o(e)=\max\{0,d(e)-c(e)\},\qquad
+  O_{\mathrm{total}}=\sum_{e\in E}o(e).
+\]
+总 overflow 可用于观察整体拥塞，但它会掩盖局部热点，因此还应关注单层、单区域和最大边上溢。并且，\textbf{GCell overflow 为零不自动意味着详细几何 DRC 为零}，因为真实间距、线端、via enclosure 和 pin access 还受到更细粒度规则约束。
+
+\subsection{不是单纯追求最短连线}
+
+常见目标包括：
+\begin{itemize}
+  \item 完成所有 nets 的逻辑连接，避免 open 和 short；
+  \item 减少 wirelength、via 数和布线资源消耗；
+  \item 缓解拥塞和 detailed-routing violations；
+  \item 控制关键路径 RC、耦合和时序损失；
+  \item 满足可制造性、天线及其他 PDK 约束。
+\end{itemize}
+
+最短树可能穿过拥塞区域，最少 via 的路径可能增加层内绕行，较短总线长也不保证关键路径时序最优。因此这些目标存在权衡，不能只用一张总线长数字评价布线质量。
+
+\subsection{多 pin net：Steiner tree 与路径搜索}
+
+一个二 pin net 可以直接搜索源点到汇点的路径；多 pin net 则需要先确定拓扑，再完成各段物理路径。Steiner tree 允许引入非终端分支点，通常比简单地把所有 pin 两两连接更节省线长。
+
+iRT 的 Solver 包括：
+\begin{itemize}
+  \item \textbf{Flute}：通过查找表快速生成 Steiner trees；
+  \item \textbf{A*}：执行三维路径搜索。
+\end{itemize}
+见 iRT \path{README.md}:29--33。这里的树拓扑与三维路径搜索是两个层次：前者决定分支怎样连接，后者在具体布线资源和障碍中寻找路径。
+
+\subsection{从 Lee 到 A* 的 Maze Routing}
+
+Maze routing 把互连问题转化为图上搜索：
+\begin{itemize}
+  \item 单位边权下，Lee/BFS 可找到边数最少的路径；
+  \item 非负且不同的边权下，Dijkstra 按累计代价扩展；
+  \item A* 在累计代价上加入启发式估计，引导搜索朝目标前进。
+\end{itemize}
+
+A* 的典型评价函数为：
+\[
+  f(n)=g(n)+h(n),
+\]
+其中 $g(n)$ 是起点到当前节点的实际代价，$h(n)$ 是到目标的估计代价。这是通用算法模型；具体 cost 是否包括 congestion、via、DRC 或 timing 项，应由 iRT 实现决定，不能仅凭“A*”名称推断。
+
+通用 maze router 还常结合 rip-up and reroute：当局部资源被早期路径占用时，拆除部分已有路径并重新搜索，以改善整体解。该概念有助于理解布线迭代，但本文不据此声称当前 GCD 运行采用了某种特定拆除顺序或协商策略。
+
+\section{iRT 的四个主要算法模块}
+
+iRT 将 Router 划分为以下模块，见 \path{chipcompiler/thirdparty/ecc-tools/src/operation/iRT/README.md}:19--33。
+
+\subsection{Pin accessor}
+
+Pin access 为 pins 分配合法 access points，并寻找可连接的端口位置。它解决的是“Router 从哪里接入这个 pin”，而不是简单读取 pin 的逻辑名称。
+
+一个 pin 即使逻辑上存在，也可能因为方向、track 对齐、周围 blockage、间距或 via 规则而难以接入。Pin access 失败是局部物理可达性问题，不能总靠增加全局绕行解决。
+
+\subsection{Global router}
+
+Global router 以 GCell 为单位，在三维网格上为 nets 分配路径和布线资源。其主要价值是：
+\begin{itemize}
+  \item 把 net topology 映射到实际层和区域；
+  \item 形成供后续阶段遵循的 global guides；
+  \item 暴露拥塞、容量不足和不合理绕行。
+\end{itemize}
+
+Global route 不是最终制造图形。仅报告 global wirelength 或 overflow，不能证明详细布线已完成。
+
+\subsection{Track assigner}
+
+Track assignment 把 global guides 中的路径进一步分配到具体 tracks。它处在粗粒度资源分配和精细几何布线之间，需要减少 guide 偏离、局部冲突和后续详细布线难度。
+
+因此，“已经选中了某些 GCells”与“已经确定每条金属形状的精确 track 和边界”是不同状态。
+
+\subsection{Detailed router}
+
+Detailed router 在三维 track grid 上执行 DRC-driven routing，生成实际 wire segments 和 vias，并处理局部几何冲突。其关注点包括：
+\begin{itemize}
+  \item 金属宽度、间距、线端和相邻形状关系；
+  \item via 与金属的 enclosure、cut spacing 和层间连接；
+  \item pin access、blockage 和已有走线；
+  \item 未连接、短路和局部绕行。
+\end{itemize}
+
+具体规则值来自 PDK/tech LEF，本文不为 ICS55 虚构数值。Router 内部 DR violation 计数可反映其迭代状态，但最终仍需 ECC 的独立 DRC 步骤确认。
+
+整个流程可概括为：
+\begin{verbatim}
+placed pins / CTS tree / blockages / tech rules
+                    |
+              Pin accessor
+                    |
+        Global router on 3-D GCells
+                    |
+             Track assigner
+                    |
+   DRC-driven detailed router on track grid
+                    |
+       routed DEF/netlist + metrics/reports
+                    |
+          LVS / DRC / RCX / STA
+\end{verbatim}
+
+\section{项目中的 Routing 配置}
+
+\path{chipcompiler/tools/ecc/configs/route_ecc.json}:1--10 和配置参考文档给出：
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.35\textwidth}p{0.19\textwidth}X}
+\toprule
+参数 & 模板/GCD 示例 & 含义 \\
+\midrule
+\code{RT.-bottom_routing_layer} & 模板为空；GCD 为 MET2 & 一般信号最低布线层 \\
+\code{RT.-top_routing_layer} & 模板为空；GCD 为 MET5 & 一般信号最高布线层 \\
+\code{RT.-thread_number} & 50 & Router 并行线程数 \\
+\code{RT.-enable_timing} & 0 & 默认不启用 timing-driven routing \\
+\code{RT.-output_csv} & 0 & 默认不导出 CSV \\
+\code{RT.-output_inter_result} & 0 & 默认不输出中间结果 \\
+\code{RT.-temp_directory_path} & 按步骤生成 & 中间数据目录，GCD 为 \code{route_ecc/data/rt} \\
+\bottomrule
+\end{tabularx}
+\end{center}
+见 \path{chipcompiler/docs/ecc-config-ref.en.md}:844--855。
+
+这里最容易误读的是 \code{enable_timing=0}：它表示 Router 的 timing-driven 模式默认关闭，\textbf{不表示后续不做 STA}。完整流程仍执行 RCX 和 STA，并用当前 corner 的 SPEF 与报告判断 setup/hold。
+
+线程数影响并行执行方式，不应当被当作布线质量指标；是否输出 CSV 或中间结果也只是可观测性配置，不改变“必须完成物理连接和后续验证”的要求。
+
+\section{ENICS 第 9 讲与 ECC 的对应关系}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.27\textwidth}p{0.31\textwidth}X}
+\toprule
+课件主题 & 在 ECC/GCD 中的对应 & 阅读边界 \\
+\midrule
+9a：Routing & 将控制器、A/B 数据通路、时钟树和接口变成物理互连 & Routing 不改变 GCD 算法，也不等同于 placement \\
+9b--9c：Maze Routing & 三维布线图、Flute Steiner tree 和 A* 路径搜索 & 通用算法原理不等于已知本次运行的全部启发式设置 \\
+9d：Routing in Practice & Pin accessor、Global router、Track assigner、Detailed router & Global guides 不是最终制造图形 \\
+9e：Signal Integrity and DFM & 实际 RC/耦合、via/wire 资源及后续 RCX/STA、DRC/Antenna 证据 & 不能由 wirelength 或单个 coupling 指标推断所有 SI/DFM 分析已完成 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{为什么 Routing 会改变时序}
+
+金属线的简化电阻可写为：
+\[
+  R\approx R_{\mathrm{sheet}}\frac{L}{W},
+\]
+其中 $L/W$ 是方块数。实际线网还具有对地、面积、边缘和相邻网络耦合电容，via 也会引入电阻。这个公式只用于建立几何直觉，不能替代 RCX 的工艺模型和三维提取。
+
+对 GCD 的 A/B 反馈路径，布线增加或重新分配 RC 后，launch/capture 路径延迟都会变化。CTS 时满足约束，不代表 post-route 仍满足；反之，某段线变长也不能脱离完整时钟与数据路径直接判断最终 slack。
+
+\subsection{Signal integrity 与 DFM 的边界}
+
+相邻 aggressor/victim 网络的耦合可能影响延迟或产生噪声风险；通孔数量、线宽、间距和局部图形密度则与可制造性和可靠性相关。但当前 Routing metrics 中存在 coupling、via 或 DRC 相关信息，并不等于所有串扰噪声、电迁移、可制造性优化都已签核。
+
+在 ECC 流程中，应分别查看 RCX、STA、DRC、Antenna、EMIR 和 Harden 的实际证据。尤其不能把 \code{route_via_count} 较小直接解释为 DFM 已通过，也不能把 \code{enable_timing=0} 解释为时序无关紧要。
+
+\section{Routing QoR 与当前 Checklist 的真实边界}
+
+\subsection{原始指标不是独立质量门}
+
+\path{chipcompiler/tools/ecc/metrics.py}:675--684 当前定义：
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.43\textwidth}X}
+\toprule
+指标 & 用途与限制 \\
+\midrule
+\code{route_wirelength} & Routing 线长诊断，不能单独证明时序或 DRC 通过 \\
+\code{route_via_count} & via 资源诊断，不能单独证明 DFM 通过 \\
+\code{route_dr_total_violation_count} & Detailed-routing 内部违规汇总，不替代独立 DRC \\
+\code{route_dr_total_patch_count} & DR patch 数量，用于观察修复规模 \\
+\code{route_dr_total_wirelength} & DR 阶段线长汇总 \\
+\code{route_dr_total_via_count} & DR 阶段 via 汇总 \\
+\code{route_la_total_overflow} & LA 阶段 overflow 证据，不等于最终几何 DRC \\
+\code{route_la_total_demand} & LA 阶段需求汇总，应与容量和区域分布共同分析 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+这些指标位于 \code{route_ecc/analysis/qor_metrics.json} 等当前分析产物中。阅读时还要区分 \code{analysis_status=incomplete} 与 \code{quality_status=blocked}：前者描述证据覆盖不完整，后者才表示当前质量门失败。
+
+\subsection{旧 EccRoutingChecklist 并没有逐项执行}
+
+\path{chipcompiler/tools/ecc/checklist.py}:19--83 的 \code{CHECKLIST_ITEMS} 仍列出 routing layer range、unrouted nets、shorts/opens、via、wirelength 和 post-route timing 等名称，类中也保留详细检查代码。
+
+但当前入口在 \path{chipcompiler/tools/ecc/checklist.py}:277--351 的第 279 行直接执行：
+\begin{quote}
+\code{return refresh_step_checklist(self.workspace, self.workspace_step)}
+\end{quote}
+因此其后的旧检查代码不可达。不能把这个布尔结果解释为当前运行已经独立执行了上述每一项检查。
+
+同时，当前稳定步骤 QoR gate 表 \path{chipcompiler/analysis/qor/gate_catalog.py}:8--23 没有 Routing gate ID；已有的是 DRC、LVS、RCX、STA，以及适用配置下的 Harden gates。Routing 仍通过 required-flow、当前产物证据和后续质量门受到约束，而不是“没有 Routing gate 就完全不受约束”。
+
+\subsection{当前 Signoff Checklist 做什么}
+
+当前实现是 schema-v3 的 current-output evidence snapshot：
+\begin{verbatim}
+Routing metrics/reports/outputs
+              |
+      QoR analysis and artifacts
+              |
+    refresh_step_checklist()
+              |
+     route_ecc/checklist.json
+              |
+    rebuild_home_checklist()
+              |
+       home/checklist.json
+\end{verbatim}
+
+核心入口见 \path{chipcompiler/tools/ecc/signoff_checklist.py}:589--599。每次刷新替换当前步骤快照，并重建全局 checklist；它不是不断追加历史打勾记录。
+
+普通 artifact 的 \code{pass} 只表示当前文件存在且非空，见 \path{signoff_checklist.py}:90--98。它不证明 short/open、DRC 或 timing 已收敛。真正的 signoff 还要结合：
+\begin{itemize}
+  \item Routing 等必要步骤的完成状态；
+  \item DRC/LVS 是否干净；
+  \item RCX corner coverage 和 SPEF parse health；
+  \item STA setup/hold 是否闭合；
+  \item 当前输入、配置、输出和 signoff package 是否可追溯。
+\end{itemize}
+
+\code{home/checklist.json} 的 \code{ready/attention/blocked} 描述 ECC 当前证据是否满足导出要求。即使为 \code{ready}，也不等于 foundry tapeout certification。
+
+\section{项目专用人工 Routing Checklist}
+
+以下清单用于学习代码和评审当前产物，\textbf{不是对某次 GCD 运行结果的声明，也不是程序自动执行项的逐字复制}。
+
+\subsection{输入、网表和布线资源}
+
+\begin{itemize}[leftmargin=2em]
+  \item[$\square$] 确认当前运行使用文档 GCD 的 10 ns 约束还是原生 fixture 的 20 ns 约束，不混用 QoR。
+  \item[$\square$] 确认输入 netlist、placement、CTS 和 legalization 属于同一当前流程，没有陈旧产物混入。
+  \item[$\square$] 确认一般 Routing 层范围为 MET2--MET5，CTS clock 层范围为 MET4--MET5，二者没有混淆。
+  \item[$\square$] 确认 tech LEF、层定义、via 和 blockage 来自当前 ICS55 PDK 配置。
+  \item[$\square$] 把 clock、reset、FSM 控制、A/B 数据通路和接口 nets 全部纳入检查，而不是只检查 \code{clk}。
+  \item[$\square$] 不把 34 个 CK sinks 错当作 34 个 nets，也不虚构 SRAM 或 macro pins。
+  \item[$\square$] 理解 50 threads 是并行设置，\code{enable_timing=0} 是 Router 模式设置，而不是验收结果。
+\end{itemize}
+
+\subsection{Pin access 与 Global Routing}
+
+\begin{itemize}[leftmargin=2em]
+  \item[$\square$] 检查标准单元和顶层接口 pins 是否有合法 access points，是否存在局部不可达。
+  \item[$\square$] 检查多 pin nets 的 Steiner topology 与实际三维路径是否合理，避免异常绕行。
+  \item[$\square$] 同时查看总 overflow、最大局部 overflow、分层需求和拥塞区域，不只看全局平均。
+  \item[$\square$] 检查高扇出控制/复位网络与时钟网络的资源竞争，但不凭 RTL 推测热点位置。
+  \item[$\square$] 区分 global guides、track assignment 和最终详细几何，确认没有停留在中间阶段。
+\end{itemize}
+
+\subsection{Detailed Routing、DRC 与连接正确性}
+
+\begin{itemize}[leftmargin=2em]
+  \item[$\square$] 查看 DR violations 和 patch 的迭代趋势，并确认最终报告对应当前输出。
+  \item[$\square$] 检查 open、short、未连接 pins、异常 via 和局部绕行的独立证据。
+  \item[$\square$] 运行并阅读独立 DRC/LVS，不用 Router 内部计数或 artifact 非空代替它们。
+  \item[$\square$] 检查 Antenna 报告；非阻塞 report 项不等于可以忽略实际风险。
+  \item[$\square$] 将 route wirelength、via count 与拥塞、时序和可制造性一起评价，不孤立追求最小值。
+\end{itemize}
+
+\subsection{RCX、STA、SI 与 DFM}
+
+\begin{itemize}[leftmargin=2em]
+  \item[$\square$] 确认所有要求的 RCX corners 都产生可解析 SPEF，没有缺角或陈旧文件。
+  \item[$\square$] 在 post-route propagated clocks 下检查 A/B 反馈和 FSM 控制路径的 setup/hold。
+  \item[$\square$] 阅读 setup/hold WNS、TNS、NVP 和各 corner 报告，而不只看一个典型 corner。
+  \item[$\square$] 理解 RCX coupling 指标只是证据之一，不据此宣称所有 SI 噪声分析已经完成。
+  \item[$\square$] 分别检查 DRC、Antenna、EMIR 和 DFM 相关证据，不用 via count 代替制造签核。
+\end{itemize}
+
+\subsection{产物、Checklist 与导出}
+
+\begin{itemize}[leftmargin=2em]
+  \item[$\square$] 阅读 \code{route_ecc/analysis/qor_metrics.json} 和 \code{qor_summary.json}，区分原始指标与质量结论。
+  \item[$\square$] 阅读 \code{route_ecc/checklist.json} 与 \code{home/checklist.json}，沿 \code{source}/\code{evidence} 追溯结论。
+  \item[$\square$] 对所有 \code{blocked=true} 项定位缺失或失败证据，不把 \code{unavailable} 当成通过。
+  \item[$\square$] 使用 \code{ecc signoff inspect} 刷新并查看 readiness；注意 blocked 时 inspect 仍返回 \code{rc=0}。
+  \item[$\square$] 使用 \code{ecc signoff check} 只读评估已保存证据；它不会刷新分析或启动 EDA。
+  \item[$\square$] 最终由 \code{ecc signoff export} 执行导出门；证据不足时不应产生 partial archive。
+\end{itemize}
+
+\section{CI 所表达的 Routing 验收方式}
+
+\path{.github/workflows/ci.yml}:707--995 定义了 E2E 设计矩阵、打包流程、signoff package 导出、Lit 产物检查和 signoff CSV 汇总。对 Routing 而言，这意味着验收不是“iRT 进程返回成功”这一件事，而是后续产物和结构化证据也必须完整。
+
+当前设计矩阵还明确排除了 \code{xtea}，见 \path{.github/workflows/ci.yml}:756--771，因此不能把矩阵描述为不加筛选地运行所有设计。本文只分析流水配置；某次 GitHub Actions 的真实状态和 artifacts 应另外通过 GitHub CLI 查询。
+
+即使 GCD CI 通过，也不能推广为任意设计都无拥塞、无 DRC 或无时序风险。GCD 没有宏、只有单时钟域，其布线复杂度不能代表含多个宏、多个时钟域和更大总线的设计。
+
+\section{总结}
+
+对当前 ECC 项目，GCD 的 Routing 可以准确概括为：
+\begin{quote}
+在 placement、CTS 和 legalization 提供的当前物理数据库上，先解决 pin access，再通过三维 GCell global routing、track assignment 和 DRC-driven detailed routing，把时钟、控制和 A/B 数据通路等 nets 实现为 MET2--MET5 上的金属与 via；随后用独立 DRC/LVS、RCX 和 STA 建立连接、几何、寄生和时序证据。
+\end{quote}
+
+Flute 和 A* 是构造树拓扑与搜索路径的手段，不是签核结论；wirelength、via、overflow 和 DR violations 是诊断证据，也不能单独代替最终质量门。当前程序 checklist 的核心是汇总当前输出及其来源，而旧 \code{EccRoutingChecklist} 中位于提前 return 之后的详细代码并不是实际执行路径。
+
+\section*{参考资料}
+\begin{enumerate}
+  \item ECOS Chip Compiler 仓库：\path{/home/kernel_dev/w/ecc}，本文引用的 GCD RTL、iRT 说明、Python 配置、QoR/checklist 源码和 GitHub Actions 流水。
+  \item ENICS Labs, \emph{Digital VLSI Design --- English}, Lecture 9, Sections 9a--9e.\\
+  \url{https://enicslabs.com/academic-courses/dvd-english/}
+  \item 同目录前文：\path{cts_ecc.tex}，GCD 时钟结构、CTS 原理和 post-CTS 时序约束。
+\end{enumerate}
+
+\end{document}

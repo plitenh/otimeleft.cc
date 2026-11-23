@@ -97,16 +97,20 @@
     if (!root) return;
 
     const site = D.site;
+    const editorMode = document.body.dataset.nav === "editor";
+    const nav = editorMode ? D.editorNav || D.nav : D.nav;
+    const brandHref = editorMode ? "editor.html" : "index.html";
+    const mark = editorMode ? "ED" : "OT";
     root.innerHTML = `
-      <a class="masthead__brand" href="index.html">
-        <div class="masthead__mark">CV</div>
+      <a class="masthead__brand" href="${brandHref}">
+        <div class="masthead__mark">${mark}</div>
         <div>
           <strong>${esc(t(site.name, site.nameZh))}</strong>
-          <small>${esc(t(site.title, site.titleZh))}</small>
+          <small>${editorMode ? esc(t("Personal editor", "个人编辑器")) : esc(t(site.title, site.titleZh))}</small>
         </div>
       </a>
       <nav class="masthead__nav" aria-label="Main navigation">
-        ${D.nav
+        ${nav
           .map(
             (n) =>
               `<a href="${n.href}" class="${state.page === n.id ? "is-active" : ""}">${esc(
@@ -167,110 +171,38 @@
 
   function renderHome() {
     const root = document.getElementById("page-root");
-    const site = D.site;
 
     root.innerHTML = `
       <div class="page-transition">
-        ${renderTemplateGuide()}
-        <section class="section hero">
-          <div>
-            <p class="hero__kicker">${esc(t(site.affiliation, site.affiliationZh))}</p>
-            <h1 class="hero__title">${esc(t(site.name, site.nameZh))}</h1>
-            <p class="hero__role">${esc(t(site.title, site.titleZh))}</p>
-            <p class="hero__text">${esc(t(site.thesis, site.thesisZh))}</p>
-            <div class="hero__tags">
-              ${site.tags.map((tag) => `<span>${esc(tag)}</span>`).join("")}
-            </div>
-            <div class="hero__actions">
-              <a class="btn btn--primary" href="admin.html">${esc(t("Open admin", "打开后台"))}</a>
-              <a class="btn btn--primary" href="resume.html">${esc(t("Build resume PDF", "组合简历并导出 PDF"))}</a>
-              <a class="btn" href="projects.html">${esc(t("View projects", "查看项目"))}</a>
-            </div>
-            <div class="hero__contacts">
-              ${site.email ? `<a href="mailto:${site.email}">${esc(site.email)}</a>` : ""}
-              ${site.phone ? `<span>${esc(site.phone)}</span>` : ""}
-              ${site.github ? `<a href="${site.github}" target="_blank" rel="noopener">${esc(site.githubLabel)}</a>` : ""}
-            </div>
-          </div>
-          <aside class="hero__aside">
-            <div class="portrait">
-              <div class="portrait__placeholder">${esc(portraitInitials(site))}</div>
-              <div class="portrait__meta">
-                ${site.age || site.nationalityZh || site.nationality ? `<p>${esc(
-                  [
-                    site.age ? (state.lang === "zh" ? site.age + "岁" : site.age + " years old") : "",
-                    t(site.nationality, site.nationalityZh),
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")
-                )}</p>` : ""}
-                <h2>${esc(t(site.education, site.educationZh))}</h2>
-              </div>
-            </div>
-            <div class="stat-grid">
-              ${site.stats
-                .map(
-                  (s) =>
-                    `<div class="stat"><strong>${esc(s.value)}</strong><span>${esc(
-                      t(s.label, s.labelZh)
-                    )}</span></div>`
-                )
-                .join("")}
-            </div>
-          </aside>
-        </section>
-
-        <section class="section">
+        <section class="section home-nav">
           <div class="section__head">
-            <span class="section__id">01</span>
-            <h2 class="section__title">${esc(t("Focus areas", "方向概览"))}</h2>
+            <span class="section__id">NAV</span>
+            <h2 class="section__title">${esc(t("Applications", "应用导航"))}</h2>
             <p class="section__lede">${esc(
               t(
-                "Modular profile — pick sections on the Resume page for different job targets.",
-                "模块化主页：在简历页按岗位勾选模块，生成不同版本 PDF。"
+                "Choose an application below. The original resume editor is one app among several.",
+                "从下方选择应用。原简历编辑器只是其中一个功能。"
               )
             )}</p>
           </div>
-          <div class="card-grid">
-            ${D.homeHighlights
+          <div class="portal-grid">
+            ${(D.apps || [])
               .map(
-                (h) => `
-              <a class="card" href="${h.href}">
-                <h3>${esc(t(h.title, h.titleZh))}</h3>
-                <p>${esc(t(h.body, h.bodyZh))}</p>
+                (app) => `
+              <a class="app-card" href="${app.href}">
+                <span class="app-card__mark">${esc(app.mark)}</span>
+                <span class="app-card__body">
+                  <strong>${esc(t(app.title, app.titleZh))}</strong>
+                  <small>${esc(t(app.desc, app.descZh))}</small>
+                </span>
+                <span class="app-card__arrow">→</span>
               </a>`
               )
               .join("")}
           </div>
         </section>
-
-        <section class="section">
-          <div class="section__head">
-            <span class="section__id">02</span>
-            <h2 class="section__title">${esc(t("Recent experience", "近期经历"))}</h2>
-          </div>
-          <div class="timeline">
-            ${(D.lists?.homeWork?.length ? D.lists.homeWork : D.lists?.work?.slice(0, 3) || [])
-              .map((id) => {
-                const m = D.modules[id];
-                if (!m) return "";
-                const preview = m.previewLines ?? 2;
-                return `
-                  <article class="timeline__item">
-                    <h3>${esc(t(m.title, m.titleZh))}${m.custom ? `<span class="tag-custom">${esc(t("custom", "临时"))}</span>` : ""}</h3>
-                    <p class="date">${esc(t(m.date, m.dateZh))}</p>
-                    <ul>${m.body
-                      .slice(0, preview)
-                      .map((_, i) => `<li>${esc(t(m.body[i], m.bodyZh[i]))}</li>`)
-                      .join("")}</ul>
-                  </article>`;
-              })
-              .join("")}
-          </div>
-        </section>
       </div>
     `;
-    bindTemplateGuide();
   }
 
   function renderProjects() {
@@ -408,6 +340,499 @@
         </p>
       </div>
     `;
+  }
+
+  function renderBlog() {
+    const root = document.getElementById("page-root");
+    const C = window.PORTFOLIO_CATALOG || {};
+    const categories = C.blogCategories || [];
+    const posts = C.posts || [];
+    let selectedCategory = "all";
+
+    function categoryLabel(cat) {
+      const found = categories.find((c) => c.id === cat);
+      return found ? t(found.labelEn, found.label) : cat;
+    }
+
+    function postRows(cat) {
+      const visible = cat === "all" ? posts : posts.filter((p) => p.category === cat);
+      if (!visible.length) {
+        return `<div class="fp-empty">${esc(
+          t("No documents archived in this category yet.", "该分类暂无归档文档。")
+        )}</div>`;
+      }
+
+      return visible
+        .map(
+          (post) => `
+        <article class="fp-row">
+          <div class="fp-row__top">
+            <span class="chip">${esc(categoryLabel(post.category))}</span>
+            ${(post.tags || [])
+              .map((tag) => `<span class="chip chip--muted">${esc(tag)}</span>`)
+              .join("")}
+          </div>
+          <h3>${esc(t(post.titleEn, post.title))}</h3>
+          <p>${esc(post.summary)}</p>
+          <div class="fp-row__files">
+            ${(post.files || [])
+              .map(
+                (file) =>
+                  `<button type="button" class="file-open" data-post="${esc(post.id)}" data-href="${esc(file.href)}">${esc(file.label)}</button>`
+              )
+              .join("")}
+          </div>
+          <div class="fp-viewer" data-viewer="${esc(post.id)}" hidden></div>
+        </article>`
+        )
+        .join("");
+    }
+
+    function isPdf(href) {
+      return /\.pdf(?:\?.*)?$/i.test(href);
+    }
+
+    function bindFileButtons(scope) {
+      scope.querySelectorAll(".file-open").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const postId = btn.dataset.post;
+          const href = btn.dataset.href;
+          const viewer = scope.querySelector(`[data-viewer="${postId}"]`);
+          if (!viewer) return;
+          if (viewer.hidden) {
+            viewer.hidden = false;
+            if (isPdf(href)) {
+              viewer.innerHTML = `
+                <div class="viewer-toolbar">
+                  <span>${esc(t("PDF preview", "PDF 预览"))}</span>
+                  <button type="button" data-close-viewer>${esc(t("Close", "关闭"))}</button>
+                </div>
+                <iframe class="pdf-frame" src="${esc(encodeURI(href))}" title="${esc(t("PDF preview", "PDF 预览"))}"></iframe>`;
+            } else {
+              viewer.innerHTML = `<div class="viewer-loading">${esc(t("Loading…", "加载中…"))}</div>`;
+              fetch(encodeURI(href))
+                .then((res) => {
+                  if (!res.ok) throw new Error("HTTP " + res.status);
+                  return res.text();
+                })
+                .then((text) => {
+                  viewer.innerHTML = `
+                    <div class="viewer-toolbar">
+                      <span>${esc(t("Source preview", "源码预览"))}</span>
+                      <button type="button" data-close-viewer>${esc(t("Close", "关闭"))}</button>
+                    </div>
+                    <pre class="file-viewer"><code>${esc(text)}</code></pre>`;
+                  bindViewerClose(viewer);
+                })
+                .catch((err) => {
+                  viewer.innerHTML = `
+                    <div class="viewer-toolbar">
+                      <span>${esc(t("Preview failed", "预览失败"))}</span>
+                      <button type="button" data-close-viewer>${esc(t("Close", "关闭"))}</button>
+                    </div>
+                    <div class="fp-empty">${esc(err.message)}</div>`;
+                  bindViewerClose(viewer);
+                });
+            }
+            bindViewerClose(viewer);
+          } else {
+            viewer.hidden = true;
+            viewer.innerHTML = "";
+          }
+        });
+      });
+    }
+
+    function bindViewerClose(viewer) {
+      const btn = viewer.querySelector("[data-close-viewer]");
+      if (btn) {
+        btn.addEventListener("click", () => {
+          viewer.hidden = true;
+          viewer.innerHTML = "";
+        });
+      }
+    }
+
+    function drawList() {
+      const list = root.querySelector("#blog-list");
+      if (!list) return;
+      list.innerHTML = postRows(selectedCategory);
+      bindFileButtons(list);
+      root.querySelectorAll(".cat-tabs button").forEach((btn) => {
+        btn.classList.toggle("is-active", btn.dataset.category === selectedCategory);
+      });
+    }
+
+    root.innerHTML = `
+      <div class="page-transition">
+        <section class="section">
+          <div class="section__head">
+            <span class="section__id">BL</span>
+            <h2 class="section__title">${esc(t("Blog / Library", "博客 / 资料库"))}</h2>
+            <p class="section__lede">${esc(
+              t(
+                "Local LaTeX sources, compiled PDFs, and papers grouped by domain.",
+                "本地 LaTeX 源码、编译 PDF 与论文，按领域分组。"
+              )
+            )}</p>
+          </div>
+
+          <div class="cat-tabs" role="tablist" aria-label="${esc(t("Categories", "分类"))}">
+            <button type="button" class="is-active" data-category="all">${esc(t("All", "全部"))}</button>
+            ${categories
+              .map(
+                (cat) =>
+                  `<button type="button" data-category="${cat.id}">${esc(t(cat.labelEn, cat.label))}</button>`
+              )
+              .join("")}
+          </div>
+
+          <div id="blog-list" class="fp-list">${postRows(selectedCategory)}</div>
+        </section>
+      </div>
+    `;
+
+    bindFileButtons(root.querySelector("#blog-list"));
+    root.querySelectorAll(".cat-tabs button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        selectedCategory = btn.dataset.category;
+        drawList();
+      });
+    });
+  }
+
+  function renderRepos() {
+    const root = document.getElementById("page-root");
+    const C = window.PORTFOLIO_CATALOG || {};
+    const repos = C.repos || [];
+
+    root.innerHTML = `
+      <div class="page-transition">
+        <section class="section">
+          <div class="section__head">
+            <span class="section__id">RE</span>
+            <h2 class="section__title">${esc(t("Open Source Repositories", "开源仓库记录"))}</h2>
+            <p class="section__lede">${esc(
+              t(
+                "Repositories reviewed with usage notes and contribution context.",
+                "看过的开源仓库，附体验与贡献上下文。"
+              )
+            )}</p>
+          </div>
+          ${
+            (C.accounts || []).length
+              ? `
+          <div class="fp-accounts">
+            ${(C.accounts || [])
+              .map(
+                (account) =>
+                  `<span class="chip">${esc(account.name || account.login)}${account.email ? ` · ${esc(account.email)}` : ""}${account.status ? ` · ${esc(account.status)}` : ""}</span>`
+              )
+              .join("")}
+          </div>`
+              : ""
+          }
+          <div class="fp-table-wrap">
+            <table class="fp-table">
+              <thead>
+                <tr>
+                  <th>${esc(t("Repository", "仓库"))}</th>
+                  <th>${esc(t("Domain", "领域"))}</th>
+                  <th>${esc(t("Notes", "体验 / 总结"))}</th>
+                  <th>${esc(t("Link", "链接"))}</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${repos
+                  .map(
+                    (repo) => `
+                  <tr>
+                    <td><a href="${esc(repo.url)}" target="_blank" rel="noopener">${esc(repo.owner)}/<strong>${esc(repo.name)}</strong></a></td>
+                    <td>${esc(repo.domain)}</td>
+                    <td>
+                      ${esc(repo.summary)}
+                      <div class="fp-row__tags">${(repo.tags || [])
+                        .map((tag) => `<span class="chip chip--muted">${esc(tag)}</span>`)
+                        .join("")}</div>
+                    </td>
+                    <td><a href="${esc(repo.url)}" target="_blank" rel="noopener">GitHub ↗</a></td>
+                  </tr>`
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  function renderContributions() {
+    const root = document.getElementById("page-root");
+    const C = window.PORTFOLIO_CATALOG || {};
+    const items = C.contributions || [];
+
+    function statusBadge(status) {
+      if (status === "merged") return `<span class="status status--merged">${esc(t("Merged", "已合入"))}</span>`;
+      if (status === "closed") return `<span class="status status--closed">${esc(t("Not merged", "未合入"))}</span>`;
+      return `<span class="status status--open">${esc(t("Open", "开放中"))}</span>`;
+    }
+
+    function openDiff(item, kind, viewer) {
+      const text = kind === "patch" ? item.patchText || item.diffText : item.diffText || item.patchText;
+      if (text) {
+        viewer.hidden = false;
+        viewer.innerHTML = `
+          <div class="viewer-toolbar">
+            <span>${kind === "patch" ? esc(t("Patch preview", "Patch 预览")) : esc(t("Diff preview", "Diff 预览"))}</span>
+            <button type="button" data-close-viewer>${esc(t("Close", "关闭"))}</button>
+          </div>
+          <pre class="file-viewer diff-viewer"><code>${esc(text)}</code></pre>`;
+        const btn = viewer.querySelector("[data-close-viewer]");
+        if (btn) btn.addEventListener("click", () => { viewer.hidden = true; viewer.innerHTML = ""; });
+        return;
+      }
+
+      const file = kind === "patch" ? item.patchFile || item.patch : item.diffFile || item.diff;
+      if (!file) {
+        viewer.innerHTML = `<div class="fp-empty">${esc(t("No diff file configured.", "未配置 diff 文件。"))}</div>`;
+        return;
+      }
+      viewer.hidden = false;
+      viewer.innerHTML = `<div class="viewer-loading">${esc(t("Loading diff…", "加载 diff…"))}</div>`;
+      fetch(encodeURI(file))
+        .then((res) => {
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.text();
+        })
+        .then((text) => {
+          viewer.innerHTML = `
+            <div class="viewer-toolbar">
+              <span>${kind === "patch" ? esc(t("Patch preview", "Patch 预览")) : esc(t("Diff preview", "Diff 预览"))}</span>
+              <button type="button" data-close-viewer>${esc(t("Close", "关闭"))}</button>
+            </div>
+            <pre class="file-viewer diff-viewer"><code>${esc(text)}</code></pre>`;
+          const btn = viewer.querySelector("[data-close-viewer]");
+          if (btn) {
+            btn.addEventListener("click", () => {
+              viewer.hidden = true;
+              viewer.innerHTML = "";
+            });
+          }
+        })
+        .catch((err) => {
+          viewer.innerHTML = `
+            <div class="viewer-toolbar">
+              <span>${esc(t("Preview failed", "预览失败"))}</span>
+              <button type="button" data-close-viewer>${esc(t("Close", "关闭"))}</button>
+            </div>
+            <div class="fp-empty">${esc(err.message)}</div>`;
+          const btn = viewer.querySelector("[data-close-viewer]");
+          if (btn) {
+            btn.addEventListener("click", () => {
+              viewer.hidden = true;
+              viewer.innerHTML = "";
+            });
+          }
+        });
+    }
+
+    root.innerHTML = `
+      <div class="page-transition">
+        <section class="section">
+          <div class="section__head">
+            <span class="section__id">CO</span>
+            <h2 class="section__title">${esc(t("Contribution Records", "贡献记录"))}</h2>
+            <p class="section__lede">${esc(
+              t(
+                "Merged and unmerged upstream work; diffs are rendered inside this page from browser-cache records.",
+                "合入与未合入的上游工作；diff 从浏览器缓存记录中读取并页内渲染。"
+              )
+            )}</p>
+          </div>
+          ${
+            items.length
+              ? `
+          <div class="fp-table-wrap">
+            <table class="fp-table">
+              <thead>
+                <tr>
+                  <th>${esc(t("Pull Request", "Pull Request"))}</th>
+                  <th>${esc(t("Status", "状态"))}</th>
+                  <th>${esc(t("Summary", "说明"))}</th>
+                  <th>${esc(t("Diff", "Diff"))}</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${items
+                  .map(
+                    (item) => `
+                  <tr>
+                    <td>
+                      <strong>${esc(item.repo)}#${item.number || "—"}</strong>
+                      <div class="fp-muted">${esc(item.title)}</div>
+                    </td>
+                    <td>${statusBadge(item.status)}</td>
+                    <td>${esc(item.summary)}</td>
+                    <td class="fp-actions">
+                      <button type="button" class="diff-open" data-id="${esc(item.id || item.number)}" data-kind="diff">${esc(t("View diff", "查看 diff"))}</button>
+                      <button type="button" class="diff-open" data-id="${esc(item.id || item.number)}" data-kind="patch">${esc(t("View patch", "查看 patch"))}</button>
+                    </td>
+                  </tr>
+                  <tr class="diff-row" id="diff-view-${esc(item.id || item.number)}" hidden>
+                    <td colspan="4"><div class="fp-viewer"></div></td>
+                  </tr>`
+                  )
+                  .join("")}
+              </tbody>
+            </table>
+          </div>`
+              : `<div class="fp-empty">${esc(
+                  t("No local contribution records yet. Import them in the Personal Editor.",
+                    "暂无本地贡献记录，请在个人编辑器中导入。")
+                )} <a href="editor.html">${esc(t("Open editor", "打开编辑器"))}</a></div>`
+          }
+        </section>
+      </div>
+    `;
+
+    root.querySelectorAll(".diff-open").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const id = btn.dataset.id;
+        const kind = btn.dataset.kind;
+        const item = items.find((x) => String(x.id || x.number) === id);
+        const row = root.querySelector(`#diff-view-${id}`);
+        if (!item || !row) return;
+        const viewer = row.querySelector(".fp-viewer");
+        row.hidden = false;
+        openDiff(item, kind, viewer);
+      });
+    });
+  }
+
+  function renderEditor() {
+    const root = document.getElementById("page-root");
+    const store = window.LocalCatalogStore;
+    const apps = D.editorApps || [];
+
+    root.innerHTML = `
+      <div class="page-transition">
+        <section class="section">
+          <div class="section__head">
+            <span class="section__id">ED</span>
+            <h2 class="section__title">${esc(t("Personal Editor", "个人编辑器"))}</h2>
+            <p class="section__lede">${esc(
+              t(
+                "Independent CV/content editor. Personal content stays in this browser only.",
+                "独立的简历/内容编辑器；个人信息仅保存在当前浏览器。"
+              )
+            )}</p>
+          </div>
+          <div class="portal-grid">
+            ${apps
+              .map(
+                (app) => `
+              <a class="app-card" href="${app.href}">
+                <span class="app-card__mark">${esc(app.mark)}</span>
+                <span class="app-card__body">
+                  <strong>${esc(t(app.title, app.titleZh))}</strong>
+                  <small>${esc(t(app.desc, app.descZh))}</small>
+                </span>
+                <span class="app-card__arrow">→</span>
+              </a>`
+              )
+              .join("")}
+          </div>
+        </section>
+
+        <section class="section">
+          <div class="section__head">
+            <span class="section__id">LC</span>
+            <h2 class="section__title">${esc(t("Local catalog cache", "本地目录缓存"))}</h2>
+            <p class="section__lede">${esc(
+              t(
+                "Repository, contribution, and account data are read from localStorage and never embedded in the static site.",
+                "仓库、贡献与账户数据只从 localStorage 读取，不写入静态站点。"
+              )
+            )}</p>
+          </div>
+          <div class="local-catalog">
+            <div class="local-catalog__toolbar">
+              <button type="button" class="btn btn--primary" id="local-import">${esc(t("Import JSON", "导入 JSON"))}</button>
+              <button type="button" class="btn" id="local-file-import">${esc(t("Load file", "读取文件"))}</button>
+              <button type="button" class="btn" id="local-export">${esc(t("Export JSON", "导出 JSON"))}</button>
+              <button type="button" class="btn" id="local-clear">${esc(t("Clear cache", "清空缓存"))}</button>
+              <input type="file" id="local-file" accept=".json,application/json" hidden />
+              <span id="local-status" class="local-status"></span>
+            </div>
+            <textarea id="local-json" spellcheck="false" aria-label="Local catalog JSON"></textarea>
+            <p class="fp-muted">${esc(
+              t(
+                "Schema: accounts[]; repos[]{owner,name,url,domain,summary,tags}; contributions[]{id,repo,number,title,status,summary,diffText,patchText}.",
+                "格式：accounts[]；repos[]{owner,name,url,domain,summary,tags}；contributions[]{id,repo,number,title,status,summary,diffText,patchText}。"
+              )
+            )}</p>
+          </div>
+        </section>
+      </div>
+    `;
+
+    const textarea = root.querySelector("#local-json");
+    const status = root.querySelector("#local-status");
+    const fileInput = root.querySelector("#local-file");
+
+    function refreshJson(message) {
+      textarea.value = store ? store.exportJson() : "{}";
+      if (message) status.textContent = message;
+      setTimeout(() => {
+        status.textContent = "";
+      }, 2500);
+    }
+
+    refreshJson();
+
+    root.querySelector("#local-import").addEventListener("click", () => {
+      try {
+        if (!store) throw new Error("LocalCatalogStore not loaded");
+        store.importJson(textarea.value, "replace");
+        refreshJson(esc(t("Saved to browser cache.", "已保存到浏览器缓存。")));
+      } catch (err) {
+        status.textContent = err.message;
+      }
+    });
+
+    root.querySelector("#local-export").addEventListener("click", () => {
+      const blob = new Blob([textarea.value], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "otimeleft-local-catalog.json";
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    root.querySelector("#local-clear").addEventListener("click", () => {
+      if (!store) return;
+      store.clear();
+      refreshJson(esc(t("Local cache cleared.", "本地缓存已清空。")));
+    });
+
+    root.querySelector("#local-file").addEventListener("change", () => {
+      const file = fileInput.files && fileInput.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          store.importJson(String(reader.result || ""), "replace");
+          refreshJson(esc(t("Imported from file.", "已从文件导入。")));
+        } catch (err) {
+          status.textContent = err.message;
+        }
+      };
+      reader.readAsText(file);
+    });
+
+    root.querySelector("#local-file-import").addEventListener("click", () => fileInput.click());
   }
 
   function buildPdfHeader() {
@@ -689,6 +1114,10 @@
     else if (state.page === "papers") renderPapers();
     else if (state.page === "awards") renderAwards();
     else if (state.page === "resume") renderResume();
+    else if (state.page === "blog") renderBlog();
+    else if (state.page === "repos") renderRepos();
+    else if (state.page === "contributions") renderContributions();
+    else if (state.page === "editor") renderEditor();
   }
 
   function init() {

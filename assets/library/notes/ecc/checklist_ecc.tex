@@ -1,0 +1,927 @@
+\documentclass[UTF8,a4paper,11pt,fontset=fandol]{ctexart}
+
+\usepackage[margin=2.25cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,array,tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!45!black,
+  citecolor=blue!45!black,
+  urlcolor=blue!55!black
+}
+\setlist{itemsep=0.32em,topsep=0.32em}
+\renewcommand{\arraystretch}{1.24}
+\setlength{\emergencystretch}{2.5em}
+\setlength{\tabcolsep}{4pt}
+\numberwithin{equation}{section}
+\newcommand{\code}[1]{\nolinkurl{#1}}
+\newcommand{\checkbox}{$\square$}
+
+\title{从微电原理到 Signoff Checklist\\
+ENICS、ICSProut55 与 ECOS Chip Compiler 汇总报告}
+\author{CTS、Placement、STA、DRC、LVS、LEC、ERC、PPA、Harden 与测试架构}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本报告以数字集成电路原理、时序与物理验证公式、常用数据格式和测试方法为主线，并用 ECOS Chip Compiler（ECC）的 GCD 流程说明这些知识如何落到可检查的证据。内容覆盖 CMOS 时钟反相、寄存器时序路径、DLL、GCLK/NCLK、门控时钟、布局线长、CTS、RC 提取、setup/hold、PLL 配置频率、Achieved Fmax、多 corner 聚合、推荐频率算法、DRC/LVS/LEC/ERC、PPA、IR-drop、电迁移、Harden 和分层测试架构。公式均给出符号、单位和适用条件，图例解释电路作用及其与指标的联系。ICSProut55 PDK 的来源采用用户指定的仓库，结合 ECC 锁定的 release、commit 和当前本地快照，区分规则来源、库载荷、工具能力与实际 signoff 结果。文末比较成熟的 EDA 软件测试架构与 ECC 当前测试组织，保留已有能力，集中讨论独立判定模型、故障矩阵、变异测试、跨 PDK 和真实可靠性签核等缺口。
+\end{abstract}
+
+\tableofcontents
+
+\section{学习地图与引用方法}
+
+\subsection{ENICS 章节与知识链}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.24\textwidth}p{0.28\textwidth}X}
+\toprule
+专题 & ENICS 章节 & 需要建立的知识链 \\
+\midrule
+Placement & Lecture 7；辅以 6c、6d & 图与超图、线长估计、解析目标、密度和拥塞、合法化。 \\
+CTS 与时钟电路 & Lecture 8，尤其 8a、8d--8g & 时钟源、缓冲树、偏差/延迟、时钟布线、PLL/DLL、CDC。 \\
+STA 与频率 & Lecture 5；11a、11b & 寄存器约束、SDC、路径报告、MMMC、OCV/SI、setup/hold 收敛。 \\
+Routing 与 RCX & Lecture 9；11a & 容量与需求、全局/详细布线、耦合、寄生提取、SPEF。 \\
+DRC/LVS/LEC/ERC & Lecture 11d & 几何规则、连接关系、布尔等价、电气与可靠性规则。 \\
+Harden & Lecture 11c；3d--3f & 填充和天线处理，GDS、LEF、Liberty 的交付语义。 \\
+PPA 与可靠性 & Lectures 4f、5--9、11 & 时序、功耗、面积以及它们对电路和物理参数的依赖。 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+ENICS 课程目录用于确定学习顺序\cite{enics}。公式和格式语义进一步引用教材、论文、标准及库文档\cite{weste,baker,liberty,lefdef,spef}。ECC 源码承担项目映射，源码行号用于定位具体实现，不替代原理和标准的出处\cite{ecc}。
+
+\subsection{三层阅读方式}
+
+\begin{enumerate}
+  \item \textbf{电路与数学层}：先明确器件、节点、路径和公式，理解指标为何如此定义。
+  \item \textbf{数据与规则层}：确认 Liberty、LEF/DEF、SPEF、SDC、GDS 和 PDK 规则各自表达什么。
+  \item \textbf{工程验收层}：将原理映射到 ECC 的 raw metric、QoR gate、checklist 和 signoff package，并为未覆盖部分安排测试或外部验证。
+\end{enumerate}
+
+\section{术语、数据格式与 ICSProut55 PDK}
+
+\subsection{核心术语表}
+
+\begin{description}[style=nextline,leftmargin=2.2cm,labelwidth=2.0cm]
+  \item[PDK] Process Design Kit。连接电路设计与特定制造工艺的数据集合，常见成分包括器件模型、技术 LEF、标准单元 LEF/Liberty、层映射、DRC/LVS/ERC 规则和可靠性模型。每一项规则的版本都属于签核条件。
+  \item[Standard cell] 具有固定高度、标准 site 和预定义逻辑/时序/物理视图的单元。触发器的 $t_{cq}$、$t_{su}$、$t_h$ 及功耗表来自相应 Liberty 视图\cite{liberty}。
+  \item[LEF/DEF] LEF 描述工艺层、site、宏单元 pin/obs 等物理抽象；DEF 描述当前设计的 die、rows、components、nets 和布线等物理实例。LEF 偏向库与抽象，DEF 偏向设计数据\cite{lefdef}。
+  \item[Liberty（LIB）] 描述 cell、pin、timing arc、lookup table、operating condition 和功耗模型。NLDM 用非线性查表近似延迟和 transition，表格索引及插值条件必须与 corner 一起阅读\cite{liberty}。
+  \item[SDC] 以 Tcl 命令表达 clocks、I/O delay、uncertainty、false path、multicycle path 等时序意图。SDC 是业界通用约束形式，具体命令行为以所用时序工具文档为准\cite{sdc}。
+  \item[SPEF] 以网络为单位记录寄生电阻、电容、耦合和节点映射，供 post-layout 延迟计算使用。SPEF 与 IEEE 1481 的延迟/功耗计算体系相关\cite{spef}。
+  \item[GDS/GDSII] 面向制造和物理验证的版图流格式，保存层、多边形和层次实例。Abstract LEF 面向布局布线，Liberty 面向时序/功耗，三者承担不同下游用途\cite{gds,lefdef,liberty}。
+  \item[CTS/RCX] CTS 构造时钟分配网络；RCX 从实际互连提取 R/C 网络。前者改变时钟拓扑，后者为布线后时序提供寄生参数。
+  \item[MMMC/PVT] Multi-Mode Multi-Corner。PVT 表示 Process、Voltage、Temperature；RC corner 描述互连寄生变化。一个完整分析视图通常由 mode、PVT library 和 RC corner 共同确定。
+  \item[DRV] Design Rule Violation 的电气约束用法，常指 max transition、max capacitance、max fanout。这里的“design rule”与几何 DRC 的含义不同，报告应给出具体规则名。
+  \item[QoR/Signoff] QoR 组织功耗、性能、面积和验证质量；signoff 要求在规定视图、规则版本和设计身份下形成可追溯的通过证据。高总分不能抵消一个阻塞性规则失败。
+\end{description}
+
+\subsection{ICSProut55：工艺数据的来源与版本}
+
+本项目使用用户指定的 PDK 仓库：
+\begin{center}
+\code{git@github.com:openecos-projects/icsprout55-pdk.git}
+\end{center}
+
+ECC 的 \code{.github/revision.toml}:30--33 将依赖锁定为：
+\begin{itemize}
+  \item repository：\code{openecos-projects/icsprout55-pdk}；
+  \item release：\code{v1.10.103}；
+  \item commit：\code{4f0a4124e3528163f6805e464a0f2fc4587549ec}。
+\end{itemize}
+
+这组版本信息解释了公式参数的来源。标准单元的 $t_{cq}$、$t_{su}$、$t_h$、内部功耗和漏电功耗随 Liberty 视图变化；互连 R/C、层厚度、宽度/间距规则和 EM 限值随工艺数据变化。跨 release 比较 QoR 时，必须同时记录 PDK commit，不能只记录设计名称。
+
+Release 标签与 source commit 需要分别记录。本地 Git 中，\code{v1.10.103} 标签解析到 \code{2d72857e14a6d479339c073070df78547b852eb7}，ECC 锁定的 \code{4f0a412...} 位于其后；两者之间只有文档提交。复现 ECC 环境时应以完整 commit 确定源码树，同时保留 release 以确定资产来源，不能把两个哈希当作同一对象。
+
+当前检出的 \code{/home/kernel_dev/w/ics55} 是另一份证据快照，其版本与库系列为：
+\begin{itemize}
+  \item HEAD：\code{10054695f86cf26a96ea8aba69f7ec414afde593}；
+  \item \code{VERSION}：\code{ics55-v2}，主分支采用 9T HVT/LVT/SVT 数据；
+  \item ECC 的上述配置属于 v1/H7C，当前树不存在 \code{IP/STD_cell/ics55_LLSC_H7C_V1p10C100}。
+\end{itemize}
+v2 清单中的 101 个 Liberty/GDS 载荷、16 个发布压缩包均未安装，65 个可选 PDF 文档也未安装。清单证明发布方声明了哪些文件及其 SHA-256，不证明这些文件已经存在于本地。本报告没有下载资产，也没有切换 PDK 分支。
+
+\code{test/pdk_runtime.py}:4--25 列出了真实 PDK 集成测试所需的最小关键文件集合，包括：
+\begin{itemize}
+  \item 技术 LEF：\code{N551P6M_ecos.lef}；
+  \item \code{ics55_LLSC_H7CR} 与 \code{ics55_LLSC_H7CL} 两套标准单元 LEF；
+  \item 两套 \code{ss_rcworst_1p08_125_nldm.lib}。
+\end{itemize}
+
+文件名中的 \code{ss} 通常表示 slow-slow 工艺视图，\code{1p08} 表示 1.08 V，\code{125} 表示 $125\,^{\circ}\mathrm{C}$，\code{nldm} 表示 Non-Linear Delay Model。\code{rcworst} 是该视图命名中的 RC 标签。正式分析仍应读取 Liberty 的 \code{operating_conditions}、电压/温度字段和 ECC corner 配置，避免仅凭文件名推断全部条件。
+
+单元测试也会创建仅含少量声明的 minimal PDK fixture，见 \code{test/conftest.py}:49--70。该 fixture 能验证路径解析和配置契约，无法证明真实单元的延迟、几何或功耗。真实 PDK 流程、最小夹具和 synthetic EMIR 数据应在测试报告中明确区分。
+
+\subsection{ICSProut55 本地证据是否充足}
+
+“证据充足”必须绑定待证明的命题。规则来源、库内容完整、工具能够执行、某个设计实际通过，是四个不同层次；前一层存在不能推出后一层成立。对当前本地快照逐项核查，可得到表中的结论。
+
+\begin{center}
+\small
+\begin{tabularx}{\textwidth}{p{0.13\textwidth}p{0.44\textwidth}X}
+\toprule
+对象 & 当前可引用的直接证据 & 能支持的结论与边界 \\
+\midrule
+DRC & 117 页 \code{ZJCX 55nm Design Rule Manual_V1.1.9.pdf}；9723 行 Calibre \code{.drc} deck。二者与 ECC 锁定 commit 中对应文件一致。 & 规则文本和可执行规则来源较充足；没有本次 GCD 运行报告，不能声明 DRC clean。 \\
+Antenna & 手册第 104--105 页给出比值、公式和保护条件；另有 1095 行 \code{.ant} deck。 & 可以引用 AR.1--AR.13 及计算方法；deck 存在不等于当前版图通过天线检查。 \\
+LVS/ERC & 9643 行 LVS deck、LVS quick-start；deck 内启用 \code{ERC_CHECK}、well 电源连接和 soft-check。 & PDK 具备部分 ERC 能力。浮动 gate/nwell 和 DFM ERC 默认关闭，覆盖范围必须按开关解释；仍需实际运行结果。 \\
+DC EM & 手册第 106 页给出 $110\,^{\circ}\mathrm{C}$ 下金属、CT/Via 和叠层孔直流限值；技术 LEF 有对应的 \code{DCCURRENTDENSITY}。 & 足够支持直流阈值来源及单位说明；未覆盖完整 PDN、电流场景、AC/RMS/peak 模型和 EMIR 报告。 \\
+RCX & 技术 LEF 含单位面积电容、边缘电容和方块电阻，例如 MET1 的 0.0007630、0.0000339 和 0.1122。 & 可支持基础寄生估算与软件流程；未发现完整 QRC/Quantus corner kit 和当前设计的提取结果，不能据此完成 RC signoff。 \\
+标准单元 & \code{liberty-timing-sense-audit-2026-10-14.md} 记录 arc 审核和修正；release 清单声明 Liberty/GDS 及其哈希。 & 审核证据有价值，但当前 v2 载荷全部缺失，v1/H7C 目录也不在当前树中，不能声称本地已具备 ECC 所需 STA/GDS 数据。 \\
+PLL & \code{IP/PLL/ics55_ecos_pll} 提供 behavioral/blackbox Verilog、LEF 和 min/typ/max Liberty。 & 足够推导时钟宏配置频率；其 Liberty 没有 timing arcs，不能单独支持 OpenROAD sizer 或 signoff STA。 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+上述手册、DRC/Antenna/LVS deck、LVS quick-start 和 \code{N551P6M.lef} 在锁定 commit 与当前 HEAD 间没有内容差异；\code{N551P6M_ecos.lef} 的相关差异是新增 9T implant layer 声明，已有 RC/EM 数值未由该差异改变。因此可以用这些文件解释锁定版本中的规则来源，同时仍须保留 v1/v2 的库数据边界\cite{pdkrules}。
+
+标准单元审核文档枚举 138306 个组合 timing arcs，检查其中 137130 个具有有效布尔转换的 arcs，并修正三类 H7C、七个 PVT 视图合计 42 处 polarity；它还记录两个 PVT 文件缺 cell 的情况。该文档证明进行了特定一致性审核，不能替代 Liberty 载荷安装、全 corner 内容验收和实际 STA\cite{pdklibaudit}。当前 README 仍列出 SPICE models、PDN、RC extraction 等待办，并声明 PDK 处于开发验证阶段，尚未完成完整硅测试与可靠性认证\cite{pdk}。
+
+结论是：\textbf{DRC/LVS/Antenna 规则来源和部分 ERC、DC EM 证据较充足；当前工作树的 Liberty/GDS 可用性、完整 RCX/EMIR、实际 clean 报告和全面硅可靠性证据不足。}
+
+\subsection{Corner 与签核条件}
+
+一个 setup/hold 结论至少绑定以下元组：
+\[
+\mathcal{C}=(\text{mode},\text{process view},V,T,\text{RC corner},
+\text{library revision},\text{constraint revision}).
+\]
+只写“SS corner”会丢失电压、温度、RC 和约束版本。ECC 的 RCX corner coverage 与 STA corner coverage 由此具有明确意义：期望集合 $\mathbb{E}$ 和实际集合 $\mathbb{A}$ 应满足
+\begin{equation}
+\mathbb{A}=\mathbb{E},\qquad \mathbb{E}\setminus\mathbb{A}=\varnothing.
+\end{equation}
+缺失 corner 时，剩余报告即便全部 clean，也只能称为部分覆盖。
+
+\section{微电图例：从晶体管到时钟与时序路径}
+
+\subsection{CMOS 反相器与 NCLK}
+
+图\ref{fig:inverter} 给出开关级 CMOS 反相器。PMOS 接 $V_{DD}$，NMOS 接 $V_{SS}$，两个栅极共享输入。输入为低电平时 PMOS 导通，输出被拉高；输入为高电平时 NMOS 导通，输出被拉低\cite{weste,baker}。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.58\textwidth]{checklist_ecc_fig_inverter.png}
+\caption{CMOS 反相器的开关级微电示意图。矩形表示受输入栅极控制的晶体管，中间节点为输出；该图解释逻辑反相和延迟来源，未表示 ICSProut55 的器件尺寸。}
+\label{fig:inverter}
+\end{figure}
+
+理想逻辑关系为 $OUT=\overline{IN}$。实际电路还存在输入电容、输出负载、PMOS/NMOS 驱动差异和 $t_{pHL}\ne t_{pLH}$。当输入是时钟时，输出时钟相对输入多出反相器延迟，并可能具有不同 rise/fall transition。CTS/STA 需要传播这些效应。
+
+\textbf{NCLK 是设计中的信号名，不存在跨项目唯一的展开方式。}常见用法包括：
+\begin{itemize}
+  \item 差分时钟对中的 negative/complement leg，即 PCLK/NCLK；
+  \item 单端时钟的反相副本，如图\ref{fig:inverter} 的 $NCLK=\overline{GCLK}$；
+  \item 供 negative-edge sequential element 使用的局部时钟网络。
+\end{itemize}
+判定时应追踪 NCLK 的驱动单元、时钟 sense、SDC generated clock 和接收单元触发边沿。仅凭名字中的 N 无法证明相位、频率或时钟域关系。差分 NCLK 还可能与 PCLK 构成互补传输，其共模、摆幅和占空比要求由接口电路决定\cite{baker}。
+
+\subsection{寄存器—组合逻辑—寄存器路径}
+
+图\ref{fig:regpath} 是 STA 的基本微结构。Launch FF 在发射边沿更新 Q，组合云产生延迟，Capture FF 在捕获边沿检查 D 的稳定性。两个时钟输入可以具有不同到达时间，其差值形成 clock skew。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.96\textwidth]{checklist_ecc_fig_regpath.png}
+\caption{寄存器时序路径图例。上方实线为数据路径，下方为时钟分配；$t_{cq}$ 是时钟到 Q 延迟，$t_d$ 是组合延迟，$s=t_{capture}-t_{launch}$。Setup 使用最晚数据，hold 使用最早数据。}
+\label{fig:regpath}
+\end{figure}
+
+该图把三个层次连接起来：晶体管和互连决定延迟，Liberty/SPEF 提供延迟数据，SDC 定义发射/捕获关系。后文的 setup、hold 和 Fmax 都由此图推导\cite{weste,sdc}。
+
+\subsection{DLL：Delay-Locked Loop}
+
+DLL 在此表示 \textbf{Delay-Locked Loop}，属于时钟相位校准电路，与操作系统中的 dynamic-link library 无关。图\ref{fig:dll} 的 VCDL 是 voltage-controlled delay line。PFD/PD 比较参考时钟和反馈时钟的相位，charge pump 与 loop filter 形成控制电压 $V_c$，VCDL 调整延迟直至边沿对齐\cite{baker,enics}。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{checklist_ecc_fig_dll.png}
+\caption{DLL 原理图例。PFD/PD 鉴相，charge pump 充放电，loop filter 平滑控制量，VCDL 产生可控延迟。反馈环调相位；倍频能力需要额外结构。}
+\label{fig:dll}
+\end{figure}
+
+设参考周期为 $T_{ref}$，VCDL 延迟为 $\tau_d$，相位差可写为
+\begin{equation}
+\Delta\phi=2\pi\frac{\tau_d}{T_{ref}}\pmod{2\pi}.
+\end{equation}
+一种常见锁定目标是 $\tau_d\approx kT_{ref}$，使输出与参考边沿同相，同时保留 $k$ 个周期的延迟。控制范围必须覆盖 PVT 变化；延迟不足或过长会导致失锁。DLL 的环路动态、jitter、phase noise、lock time 和 duty-cycle distortion 需要模拟/混合信号验证，数字 RTL-to-GDS checklist 无法替代这些测试。
+
+PLL 使用受控振荡器形成频率和相位闭环，常见于倍频与频率综合；DLL 使用延迟线调整相位。两者都能驱动后续 GCLK 树，具体时钟源应由原理图和约束确认。ENICS 8f 的 Clock Generation 是这一主题的课程入口\cite{enics}。
+
+\subsection{GCLK、门控时钟与 NCLK 的关系}
+
+GCLK 常见两种含义：\textbf{global clock} 和 \textbf{gated clock}。前者强调全局分配，后者强调经过 clock gating。图\ref{fig:clocknames} 将两种用法同时画出，并使用文字标注消除歧义。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=\textwidth]{checklist_ecc_fig_clocknames.png}
+\caption{Global clock、gated clock 与反相 clock 的命名图例。ICG 在时钟低相位锁存使能，降低门控毛刺风险；nclk 在此例中是反相分支。项目信号名可任意选择，电路连接才决定语义。}
+\label{fig:clocknames}
+\end{figure}
+
+低相位锁存使能的简化 AND 门控可写为
+\begin{equation}
+gclk=GCLK\land EN_{latched\ while\ GCLK=0}.
+\end{equation}
+使能在高相位变化会受到锁存器隔离，从而降低窄脉冲和毛刺。普通组合 AND 直接门控缺乏该保护。ICG 的 setup/hold、enable test、scan/test bypass 和时钟树例外均需检查\cite{weste}。
+
+GCLK/NCLK 的名称本身不会自动创建 SDC 时钟。时钟树工具需要 clock root、generated-clock 关系、clock sense、sink 和 exception；CDC 分析还需判断两个时钟的相位/频率关系以及跨域同步结构。ENICS 8g 的 CDC 与此相连\cite{enics}。
+
+\section{Placement：线长、密度和可布线性}
+
+\subsection{HPWL、RSMT 与实际布线长度}
+
+一个 net 的 pin 坐标集合为 $P_n=\{(x_i,y_i)\}$，Half-Perimeter Wirelength 定义为
+\begin{equation}
+HPWL_n=\left(\max_i x_i-\min_i x_i\right)+
+\left(\max_i y_i-\min_i y_i\right).
+\end{equation}
+总 HPWL 为 $\sum_n w_nHPWL_n$，$w_n$ 可表示 net 权重。HPWL 忽略障碍、层容量、via 和精确 pin access，适合作为快速布局代理指标。
+
+RSMT（Rectilinear Steiner Minimum Tree）允许引入 Steiner 点，以 rectilinear tree 连接多 pin net。FLUTE 通过查找表快速构造近似 RSMT\cite{flute}。Global-route wirelength 又加入拓扑和容量约束，detailed-route 长度继续受到 track、DRC、via 和局部绕线影响。因此常见的证据链是
+\[
+HPWL\rightarrow RSMT/FLUTE\ estimate\rightarrow GRWL
+\rightarrow detailed\ wirelength.
+\]
+四者回答不同精度的问题，不能直接比较绝对值来宣布优化退化。
+
+\subsection{解析布局与密度约束}
+
+解析布局可抽象为
+\begin{equation}
+\min_{\mathbf{x},\mathbf{y}}\;WL(\mathbf{x},\mathbf{y})
++\lambda D(\mathbf{x},\mathbf{y}),
+\end{equation}
+其中 $WL$ 是可微线长近似，$D$ 是密度惩罚，$\lambda$ 控制两类目标的权衡。DREAMPlace 使用 GPU 加速的现代解析布局方法，其论文给出了 wirelength/density 优化框架\cite{dreamplace}。合法化随后处理 row/site、方向和重叠约束。
+
+对布线 edge $e$，容量与需求分别记为 $C_e$ 和 $D_e$，常用 overflow 定义为
+\begin{equation}
+overflow_e=\max(0,D_e-C_e),\qquad
+O_{total}=\sum_e overflow_e,\quad O_{max}=\max_e overflow_e.
+\end{equation}
+全局平均密度可能掩盖局部热点，所以 total、max 和空间分布应一起检查。Placement 阶段的 congestion estimate 也不能代替最终 detailed routing 的 opens/shorts 检查。
+
+\subsection{面积与利用率}
+
+标准单元利用率常写为
+\begin{equation}
+U_{std}=\frac{A_{std}}{A_{placeable}}\times100\%.
+\end{equation}
+宏较多时还需单独报告 $A_{macro}$ 和 macro-inclusive utilization。分母可能取 core area、扣除 blockage 后的 placeable area 或其他工具定义，比较前必须统一口径。
+
+ECC 对应的原始指标包括 \code{place_hpwl}、\code{place_grwl}、\code{place_flute_wirelength}、EGR overflow total/max 和 RUDY/LUTRUDY。人工评审应把这些数值放回版图：查看高密度 bins、宏周边通道、寄存器聚集区域和关键路径，避免仅凭一个线长数值判断可布线性。当前没有稳定的 Placement QoR gate，指标解释和后续 Routing/DRC 结果因此尤其重要。
+
+\section{CTS：skew、latency、transition 与功耗}
+
+\subsection{基本定义}
+
+设时钟从 root 到 sink $i$ 的 insertion latency 为 $L_i$。两 sink 间 signed skew 和整树全局范围为
+\begin{equation}
+skew_{i,j}=L_i-L_j,\qquad
+S_{global}=\max_iL_i-\min_iL_i.
+\end{equation}
+Latency 描述时钟到达时间，skew 描述 sink 间差异，jitter 描述边沿随时间的不确定性，transition/slew 描述边沿斜率。四个量不可互换。
+
+对图\ref{fig:regpath}，正 $s=L_{capture}-L_{launch}$ 增加 setup 可用时间，却会压缩 hold 余量。CTS 的目标也包含 max transition、max capacitance、buffer 层级和功耗，单纯追求零 skew 可能造成过度缓冲和高时钟功耗\cite{enics,weste}。
+
+缓冲链的总时钟延迟可概括为
+\begin{equation}
+L_i=\sum_{b\in path(i)}t_b(R,C,V,T)+t_{wire,i},
+\end{equation}
+其中 $t_b$ 来自相应 Liberty 弧和输入 slew/output load，$t_{wire,i}$ 来自估计或提取的互连 RC。Post-CTS 估计与实际 clock routing 后的数值应分别标记。
+
+\subsection{ECC/GCD 映射与检查}
+
+GCD 具有一个 \code{clk} 域，2 个 FSM state sinks、16 个 A register sinks 和 16 个 B register sinks，共 34 个 CK sinks。CTS 输入是一根高扇出时钟网，输出包含缓冲树。34 个 sinks 只描述时钟负载数量，不代表全设计 net 数量。
+
+ECC 的 raw metrics 包括 buffer count/area、clock wirelength、tree level、worst optimized skew、max insertion latency 和 unmet skew target count。人工 checklist 应继续追问：
+\begin{itemize}
+  \item[\checkbox] sink、ignore/stop pin、generated clock 和 clock exception 是否与 SDC/原理图一致；
+  \item[\checkbox] transition、capacitance 和 clock latency 是否在所有要求视图满足约束；
+  \item[\checkbox] buffer 面积、时钟功耗和局部拥塞是否与 skew 收益相称；
+  \item[\checkbox] post-route STA 是否使用当前 propagated clock 与 RCX 结果重新计算；
+  \item[\checkbox] GCLK/NCLK/门控分支若存在，clock sense 和 ICG enable timing 是否单独验证。
+\end{itemize}
+当前没有稳定的 CTS QoR gate，旧 checklist 中位于提前返回之后的详细检查也不能计入当前自动覆盖。
+
+\section{Routing 与 RCX：从几何连接到延迟模型}
+
+\subsection{布线容量、open/short 与天线}
+
+Router 将逻辑 net 转换为金属和 via。Global routing 分配 coarse regions/edges，track assignment 分配轨道，detailed routing 完成精确几何。每段互连需满足 width、spacing、enclosure、via 和 pin-access 规则。
+
+Open 表示预期连接未形成，short 表示不同网络发生意外导电连接。LVS 对连接关系提供独立验证，DRC 检查几何规则，两者共同覆盖一部分布线错误。Router 返回成功仍需最终报告支持。
+
+天线效应与等离子工艺中的电荷积累有关。ICS55 手册第 104--105 页用直接相连的栅面积 $A_g=WL$ 归一化导体面积，并给出无保护 ACT 时的部分 Core/IO 共同限值\cite{pdkrules}：
+\begin{align}
+AR_{poly}&=\frac{A_{POLY}}{WL}\le250,\\
+AR_{poly,sidewall}&=\frac{A_{POLY,sidewall}}{WL}\le500,\\
+AR_{CT}&=\frac{\sum A_{CT}}{WL}\le10,\\
+AR_{via,n}&=\frac{\sum A_{via,n}}{WL}\le20.
+\end{align}
+手册还给出累积金属 $(A_{M1}+\cdots)/(WL)$、累积通孔、RV/CB、RDL/ALPAD 及有保护 ACT 的 AR.5--AR.13 规则；保护二极管、well tap、源漏连接和累积方式会改变计算。具体比值、层权重和 diode 处理应由对应版本的 \code{.ant} deck 执行。增加 ACT 保护或改变金属拓扑可降低风险；普通功能仿真不会自动发现这类制造过程损伤\cite{enics,pdkrules}。这些数值证明本地有可引用的天线规则来源，不构成某个设计已经 antenna clean 的证据。
+
+\subsection{RC 网络与 Elmore 延迟}
+
+图\ref{fig:rc} 将两段互连抽象为电阻、对地电容和耦合电容。$R$ 与线长、宽度、厚度和材料电阻率有关，$C$ 与面积、间距、介质和邻层环境有关。SPEF 保存这些节点和元件，STA 再计算响应\cite{spef,elmore}。
+
+\begin{figure}[htbp]
+\centering
+\includegraphics[width=0.93\textwidth]{checklist_ecc_fig_rc.png}
+\caption{互连 RC 与耦合图例。$R_A/R_B$ 表示路径电阻，$C_A/C_B$ 表示对地电容，$C_c$ 表示相邻网络耦合。图中元件由 RCX 按实际几何和工艺模型生成。}
+\label{fig:rc}
+\end{figure}
+
+对 RC tree，Elmore 延迟可写成
+\begin{equation}
+t_{Elmore}=\sum_{k}R_k\sum_{j\in downstream(k)}C_j,
+\end{equation}
+即每个电阻乘以其下游总电容后求和\cite{elmore}。该近似解释了“驱动电阻乘以下游负载”的一阶延迟来源。耦合网络还受到 aggressor 切换方向和时间窗影响，完整 SI 分析可能引入额外延迟和噪声。
+
+当前技术 LEF 的 \code{CAPACITANCE CPERSQDIST}、\code{EDGECAPACITANCE} 和 \code{RESISTANCE RPERSQ} 可提供一阶几何—寄生映射。例如 MET1 对应数值为 0.0007630、0.0000339 和 0.1122；量纲和数据库单位必须按 LEF 声明及工具约定解释。它们与布线几何可以支持基础 RC 估计，不能替代完整 RC corner、耦合模型、提取器校准和 SPEF signoff。
+
+RCX checklist 中的 corner coverage、SPEF parse health、total/coupling capacitance 和 resistance 应与上述模型对应。SPEF 文件存在只提供输入条件；解析失败、缺失 corner、异常零 R/C 或版本错配都需要独立处理。
+
+\section{STA、WNS/TNS/NVP 与“推荐频率”}
+
+\subsection{Setup 与 hold 公式}
+
+沿用图\ref{fig:regpath}，令 $s=L_{capture}-L_{launch}$，$U$ 为不确定度。Setup 的最晚数据到达和捕获要求可写为
+\begin{align}
+A_{setup}&=L_{launch}+t_{cq,\max}+t_{d,\max},\\
+R_{setup}&=L_{capture}+T_{clk}-t_{su}-U,\\
+S_{setup}&=R_{setup}-A_{setup}\\
+&=T_{clk}+s-t_{su}-U-t_{cq,\max}-t_{d,\max}.
+\end{align}
+$S_{setup}\ge0$ 表示该路径在当前模型下满足 setup。正 skew 增大 $S_{setup}$。
+
+Hold 检查发射边沿附近的数据最早变化，简化表达为
+\begin{equation}
+S_{hold}=t_{cq,\min}+t_{d,\min}-s-t_h-U_h.
+\end{equation}
+$S_{hold}\ge0$ 表示数据在捕获保持窗口之后变化。正 skew 会减小 hold slack。Setup 常通过降低频率恢复，hold 通常需要增加数据延迟或调整时钟/约束，不能依靠降频统一解决\cite{weste,sdc}。
+
+实际 MMMC STA 还包含 clock uncertainty、OCV、library interpolation、I/O budgets、generated clocks、path exceptions 和 SI。False path 或 multicycle path 必须有设计依据；unconstrained path 没有被计算 slack，不能混入“零违例”。
+
+\subsection{WNS、TNS 和 NVP}
+
+设路径或 endpoint 集合为 $\mathcal{P}$，$S_i$ 为对应 slack：
+\begin{align}
+WNS&=\min_{i\in\mathcal{P}}S_i,\\
+TNS&=\sum_{i\in\mathcal{P}}\min(0,S_i),\\
+NVP&=\#\{i\in\mathcal{P}:S_i<0\}.
+\end{align}
+部分工具将通过场景的 WNS/TNS 截为零，也有工具保留正 WNS。报告应记录采用的约定。TNS 常以负值表示总违例，因此“TNS $\ge0$”在该约定下等价于 TNS 为零。NVP 统计 violating paths 或 endpoints，具体集合需看报告定义。
+
+ECC 的 setup/hold gates 同时要求 corner coverage、对应状态、WNS/TNS 非负和 NVP 为零。单独一个正 WNS 无法覆盖缺失 corner 或其他 endpoint 违例。
+
+\subsection{目标频率、时钟输出频率、Achieved Fmax 与推荐频率}
+
+这些量回答不同问题，必须使用不同符号和证据：
+\begin{description}[style=nextline,leftmargin=3.0cm,labelwidth=2.8cm]
+  \item[$F_{target}$] SDC 或项目规格要求的目标频率，由目标周期换算。
+  \item[$F_{OUT}$] PLL 等时钟宏在特定配置和参考时钟下产生的输出频率。
+  \item[$F_{achieved}$] 由现有一次 setup 结果按周期—slack 关系推算的频率估计。
+  \item[$F_{verified}$] 在指定候选集合中，重新签到并通过全部规定门槛的最高频率。
+  \item[$F_{recommended}$] 在 $F_{verified}$ 上应用明确工程裕量、选择可实现的时钟配置并再次验收后得到的建议运行频率。
+\end{description}
+目标频率是输入要求，时钟输出频率是可配置量，Achieved Fmax 是分析估计，推荐频率是带证据和裕量的工程决策。下文依次给出算法；ECC 当前已有目标周期换算、Achieved Fmax 回退、频率余量和 corner WNS 聚合，完整推荐频率流程是本文建议的扩展，并非对现有 ECC 行为的描述。
+
+\subsection{时钟宏输出频率：合法配置搜索}
+
+ICS55 的 \code{PLL_TOP} 集成文档定义反馈分频 \code{N[7:0]}、反馈选择 \code{SELECT} 和输出分频 \code{OD[1:0]}。令 $s=\mathrm{SELECT}$，则
+\begin{align}
+K(s)&=\begin{cases}1,&s=0,\\2,&s=1,\end{cases}\\
+D(\mathrm{OD})&=\begin{cases}
+1,&\mathrm{OD}=00,\\2,&\mathrm{OD}=01,\\
+4,&\mathrm{OD}=10,\\8,&\mathrm{OD}=11,
+\end{cases}\\
+F_{VCO}&=F_{REFCLK}\,N\,K(s),\\
+F_{OUT}(N,s,\mathrm{OD})&=\frac{F_{REFCLK}\,N\,K(s)}{D(\mathrm{OD})}.
+\label{eq:pll-fout}
+\end{align}
+这里的频率统一使用 MHz。公开集成视图给出的合法范围为 $F_{REFCLK}=5$--$40$ MHz、整数 $N=17$--$255$、$F_{VCO}=500$--$1200$ MHz，$D$ 只能取 1、2、4、8。Bypass（\code{BP=1}）时 behavioral model 将 \code{REFCLK} 直接送到两个主输出，应作为另一种配置处理，不能套用 VCO 公式\cite{pll}。
+
+对所需频率 $F_{req}$ 和相对容差 $\epsilon\ge0$，先构造合法配置集合
+\begin{equation}
+\begin{aligned}
+\mathcal{K}(F_{REFCLK})={}&\{(N,s,\mathrm{OD}):N\in\mathbb{Z},\ 17\le N\le255,\\
+&s\in\{0,1\},\ \mathrm{OD}\in\{00,01,10,11\},\\
+&500\le F_{REFCLK}NK(s)\le1200\},\\
+\mathcal{K}_{\epsilon}={}&\{k\in\mathcal{K}:|F_{OUT}(k)-F_{req}|\le\epsilon F_{req}\}.
+\end{aligned}
+\end{equation}
+配置算法为：
+\begin{enumerate}
+  \item 校验参考频率、输入范围和 PLL/bypass 模式；
+  \item 枚举 $N$、$s$ 和 $\mathrm{OD}$，计算 $F_{VCO}$，先排除 VCO 越界组合，再计算 $F_{OUT}$；
+  \item 在 $\mathcal{K}_{\epsilon}$ 中选择相对误差最小的配置。若仍有多解，可按明确项目策略依次比较 $F_{VCO}$、$N$、$D$ 和 $s$，保证结果可复现；这些平局规则属于设计策略，不是 PDK 新增约束；
+  \item 若 $\mathcal{K}_{\epsilon}=\varnothing$，输出“无满足容差的合法配置”，不能四舍五入到一个越界的 VCO；
+  \item 用实际输出频率生成主时钟周期 $T_{SDC}[\mathrm{ns}]=1000/F_{OUT}[\mathrm{MHz}]$，并重新核对 generated clocks、I/O delay、uncertainty 和多周期关系。
+\end{enumerate}
+
+例如 $F_{REFCLK}=20$ MHz、$N=40$、$s=0$、$D=4$ 时，$F_{VCO}=800$ MHz，$F_{OUT}=200$ MHz，对应 $T_{SDC}=5$ ns。离散分频意味着任意目标频率未必能精确实现；STA 必须使用实际配置对应的周期。PLL 的 15 us typical startup 是锁定等待时间，不参与 $F_{OUT}$ 计算；30 ps typical period jitter 和 45\%--55\% duty cycle 应进入不确定性、占空比和半周期路径检查。典型值不能替代完整 signoff 模型，也不能在未定义策略时直接从 $F_{achieved}$ 中扣除。
+
+\subsection{单 corner Achieved Fmax：ECC 当前算法}
+
+目标频率由 SDC/项目参数给出：
+\begin{equation}
+F_{target}[\mathrm{MHz}]=\frac{1000}{T_{clk}[\mathrm{ns}]}.
+\end{equation}
+在保持数据路径延迟、skew、$t_{su}$ 和不确定度不变的局部近似下，由上述 setup 关系可知，周期改变量可以近似平移 setup slack。当前周期为 $T_{clk}$、带符号 worst setup slack 为 $S$ 时，临界所需周期估计为
+\begin{equation}
+\widehat{T}_{min}=T_{clk}-S,
+\end{equation}
+于是
+\begin{equation}
+\widehat{F}_{achieved}[\mathrm{MHz}]
+=\frac{1000}{T_{clk}[\mathrm{ns}]-S[\mathrm{ns}]},
+\qquad T_{clk}>0,\quad T_{clk}-S>0.
+\label{eq:fmax}
+\end{equation}
+负 $S$ 使推算频率低于目标，正 $S$ 使推算频率高于目标。该公式是一阶外推；跨很大的频率区间时，I/O budget、generated-clock 波形、clock uncertainty、SI 和实现结果可能改变，必须重新运行 STA。
+
+ECC 还定义频率余量\cite{ecc}：
+\begin{equation}
+M_F=\frac{\widehat{F}_{achieved}-F_{target}}{F_{target}}
+=\frac{S}{T_{clk}-S}.
+\end{equation}
+项目测试在 \code{test/test_signoff_report.py}:157--168 给出目标 200 MHz、$T=5$ ns、$S=-0.25$ ns 的例子：
+\[
+\widehat{F}_{achieved}=\frac{1000}{5-(-0.25)}=190.48\ \mathrm{MHz},
+\qquad M_F\approx-4.76\%.
+\]
+计算回退逻辑位于 \code{chipcompiler/engine/signoff/report_timing.py}:288--308，QoR feature 位于 \code{chipcompiler/analysis/qor/features.py}:274--285。源码的完整回退顺序是：优先采用工具已经报告的 Achieved Fmax；没有该字段且 $T_{clk}$ 与 setup WNS 均存在时，按式\eqref{eq:fmax} 计算并保留两位小数；若 WNS 也缺失而 $T_{clk}$ 存在，只回退为 $1000/T_{clk}$。最后一种情况仅表示目标频率，不能解读为“时序分析已证明达到该频率”。若 $T_{clk}-S\le0$，当前回退代码保持结果为空；调用方不应把非法值钳制成零频率。
+
+使用式\eqref{eq:fmax} 还需检查：
+\begin{itemize}
+  \item WNS 必须有效且带符号。若通过场景的 WNS 被截成零，正余量无法恢复；在局部 setup 近似内，$F_{target}$ 只能视为保守下界；
+  \item missing、malformed、工具失败和 unconstrained path 不能作为 $S=0$ 参与计算；
+  \item $S$ 使用 ns 时分子为 1000，结果才是 MHz；使用 ps、us 或 s 时必须相应换算；
+  \item hold、DRV、ERC、DRC/LVS、SI 和可靠性约束不在该公式内，芯片实测最高频率也不在其证明范围内。
+\end{itemize}
+
+\subsection{多 corner 聚合：先验证集合，再取最差值}
+
+设期望 corner 集合为 $\mathbb{E}$，实际有效集合为 $\mathbb{A}$。完整估计首先要求 $\mathbb{A}=\mathbb{E}$。若各视图共享目标周期 $T$，可对每个 $c\in\mathbb{E}$ 计算
+\begin{equation}
+\widehat{F}_c=\frac{1000}{T-S_c},\qquad T-S_c>0,
+\end{equation}
+再取
+\begin{equation}
+\widehat{F}_{MMMC}=\min_{c\in\mathbb{E}}\widehat{F}_c
+=\frac{1000}{T-\min_{c\in\mathbb{E}}S_c}.
+\label{eq:mmmc-fmax}
+\end{equation}
+若不同 mode/corner 使用不同目标周期 $T_c$，必须分别计算 $1000/(T_c-S_c)$ 后取最小值，不能直接比较不同周期下的原始 slack。任一必需 corner 缺失或无效时，只能输出带 corner 清单的 partial estimate；完整 signoff Fmax 应为 unavailable，而非在剩余集合上宣称全局通过。ECC 的 corner rollup 取最小 setup WNS，共享周期时与式\eqref{eq:mmmc-fmax} 等价。
+
+例如两个视图在 $T=5$ ns 下分别有 $S_1=-0.25$ ns、$S_2=0.10$ ns，则 $\widehat{F}_1=190.48$ MHz、$\widehat{F}_2=204.08$ MHz，聚合估计为 190.48 MHz。这个结果适合安排后续候选频率的验证顺序，仍不是最终推荐值。
+
+\subsection{推荐频率：候选扫描、guardband 与最终复验}
+
+推荐频率算法还需要四类输入：可实现候选频率集合 $\mathcal{F}$、最低应用需求 $F_{min}$、完整 corner/规则集合以及 guardband 策略。$\mathcal{F}$ 可由式\eqref{eq:pll-fout} 的所有合法输出去重得到，也可包含外部时钟源允许的频率，并受封装、接口和系统规格上限约束。对候选 $f$，定义阻塞性总判定
+\begin{equation}
+\begin{aligned}
+\mathrm{PASS}(f)={}&C_{coverage}\land C_{setup}\land C_{hold}\land C_{DRV}\land C_{SI}\\
+&\land C_{DRC}\land C_{LVS}\land C_{LEC}\land C_{ERC/antenna}\\
+&\land C_{IR/EM}\land C_{power/thermal}\land C_{identity}.
+\end{aligned}
+\label{eq:all-gates}
+\end{equation}
+各 $C$ 都必须在同一个 $f$ 对应的当前设计身份下有效。Coverage 包含无缺失 corner、无未解释的 unconstrained paths；$C_{identity}$ 要求 RTL、SDC、网表、DEF/GDS、SPEF、库、deck、工具版本和报告 hash 一致。一个 QoR 加权分数不能替代式\eqref{eq:all-gates} 的逐项通过。
+
+本文建议的算法如下：
+\begin{enumerate}
+  \item \textbf{生成并排序候选}：从合法时钟配置生成 $\mathcal{F}$，过滤低于 $F_{min}$ 和高于系统上限的项，按频率从高到低排列。Achieved Fmax 可用于安排搜索起点，不能跳过复验。
+  \item \textbf{逐候选重新签到}：为候选 $f$ 选择实际时钟配置，重建 SDC 和 generated clocks；按需重跑实现及 RCX/STA。任何网表或版图变化都要重跑受影响的物理与等价检查。
+  \item \textbf{找最高全通过点}：按降序返回第一个满足 $\mathrm{PASS}(f)$ 的候选，记为 $F_{verified}$。若全部失败，输出“无可推荐频率”及失败矩阵。该降序扫描不假设 pass 随频率单调变化。
+  \item \textbf{应用显式裕量}：若采用频率域相对裕量 $g_f\in[0,1)$，定义
+  \begin{equation}
+  F_{guard}=(1-g_f)F_{verified}.
+  \end{equation}
+  若项目采用时间域裕量，则应定义 $T_{guard}=T_{verified}+\Delta T$ 后再换算，不能混用两种口径。$g_f$ 或 $\Delta T$ 是由老化、测量误差、环境和产品策略确定的输入，不存在通用固定百分比；已在 OCV/uncertainty 中计入的项目不得重复扣减。
+  \item \textbf{选择可实现值并复验}：在不超过 $F_{guard}$ 且不低于 $F_{min}$ 的候选中，从高到低寻找第一个再次满足 $\mathrm{PASS}(f)$ 的频率，记为 $F_{recommended}$。若该点失败则继续检查下一较低候选；全部失败时仍输出“无可推荐频率”。改变分频或时钟波形后，hold 和跨时钟关系也需重新验证，不能由高频率点的 pass 自动推出低频率点的全部 pass。
+  \item \textbf{输出证据包}：同时给出 $F_{target}$、$F_{OUT}$、$F_{verified}$、$F_{recommended}$、所选 $(N,s,\mathrm{OD})$、guardband、corner 清单、失败项和所有输入版本身份。
+\end{enumerate}
+
+外部连续可调时钟若采用频率网格搜索，结论只能称为“该网格和容差内的最高通过点”。多目标应用还可增加功耗或吞吐约束，但任何加权目标都应在全部阻塞性门槛之后使用。
+
+\subsection{完整数值例与当前实现边界}
+
+以下仅演示算法，slack 和 pass/fail 都是假设输入，不是 GCD 或 ICS55 的实测 QoR。固定 $F_{REFCLK}=20$ MHz、$s=0$、$D=4$，则 $F_{OUT}=5N$ MHz；VCO 合法范围使本例候选落在 125--300 MHz 的 5 MHz 网格上。初始 $N=40$ 给出 200 MHz 和 5 ns 周期，两个 corner 的 Achieved Fmax 估计为 190.48 MHz 与 204.08 MHz，聚合估计 190.48 MHz。
+
+假设重新签到后 195 MHz 失败、190 MHz 的全部规定门槛通过，则 $F_{verified}=190$ MHz。若项目明确选择 $g_f=5\%$，则 $F_{guard}=180.5$ MHz；网格上不超过该值的最高候选是 180 MHz，对应 $N=36$、$F_{VCO}=720$ MHz。只有 180 MHz 再次通过全部门槛后，算法才输出 $F_{recommended}=180$ MHz；若它失败，则继续验证 175 MHz 等候选。若没有候选同时满足 $F_{min}$ 和全部门槛，正确结果是不可推荐。
+
+因此，190.48 MHz 是局部 setup 外推，190 MHz 是假设的候选集合内最高全通过点，180 MHz 是加入裕量并复验后的建议运行频率。当前 ECC 实现提供其中的目标频率换算、Achieved Fmax 回退和频率余量；上述 PLL 配置搜索、失败矩阵、guardband 选择及最终复验是建议增加的工程算法。
+
+\section{DRC、LVS、LEC 与 ERC 的证明边界}
+
+\subsection{DRC：几何谓词与规则 deck}
+
+几何规则可以写成一组谓词，例如
+\begin{equation}
+w\ge w_{min},\qquad s\ge s_{min},\qquad e\ge e_{min},
+\end{equation}
+分别表示宽度、间距和 enclosure。实际规则还包含层依赖、方向、长度、相邻几何、密度、via 和复杂上下文。阈值来自目标 PDK/foundry deck，不能从“55 nm”推导出统一数值。
+
+DRC clean 表示指定 deck、指定输入版本下违例计数为零：
+\begin{equation}
+DRC\ pass\Longleftrightarrow N_{DRC}=0
+\land tool\ completed\land report\ valid.
+\end{equation}
+ECC 的 \code{qor.drc.clean} 使用 \code{drc_count==0}，artifact 与报告健康用于防止工具失败形成假零。Waiver 需要独立批准、适用范围和版本记录。
+
+\subsection{LVS：连接关系和器件关系}
+
+LVS 将 layout-extracted netlist 与 source/schematic netlist 比较。可把每个网表抽象为带器件和端口标签的图 $G=(V,E)$，检查是否存在满足约束的映射 $M$：
+\begin{equation}
+M(G_{layout})\cong G_{source}.
+\end{equation}
+映射需要保持器件类型/参数、ports、网络邻接和电源地关系。串联/并联归并、black box、physical-only cells 和宏模型处理会改变比较规则。
+
+ECC 的 \code{qor.lvs.clean} 使用 \code{lvs_count==0}。LVS 证明提取版图与参考网表一致；它不量化时序，也不证明该网表与原始 RTL 功能等价。
+
+\subsection{LEC：布尔等价和证明新鲜度}
+
+组合逻辑等价可写为
+\begin{equation}
+\forall \mathbf{x}\in\mathbb{B}^n,\quad
+F_{golden}(\mathbf{x})=F_{gate}(\mathbf{x}),
+\end{equation}
+其中 $\mathbb{B}=\{0,1\}$。SAT 方法常构造 miter：
+\begin{equation}
+M(\mathbf{x})=F_{golden}(\mathbf{x})\oplus F_{gate}(\mathbf{x}),
+\end{equation}
+若 $M$ 不可满足（UNSAT），则在给定约束和模型下不存在产生差异的输入。顺序设计还需要状态映射、复位假设和时序等价策略\cite{sat}。
+
+模拟测试只能覆盖所选激励，形式证明覆盖其建模空间。Unknown、timeout、未建模 black box 和错误约束都会削弱证明范围。
+
+ECC 的 LEC result 还记录 golden/gate 路径、SHA-256 和文件大小。有效证明需满足
+\begin{equation}
+status=proven\land hash_{recorded}=hash_{current}
+\land path/size\ consistent.
+\end{equation}
+任一输入变化都可能使 miter 改变，stale proof 必须退出当前 pass 集合。综合后 \code{lec} 默认跳过，postRouteLec 按流程条件进入 signoff。
+
+\subsection{ERC：电压、电流和连接健康}
+
+ERC 检查电气规则，例如浮动节点、错误电源连接、器件端电压过应力、电压域接口和特殊网络要求。过应力可抽象为
+\begin{equation}
+|V_{GS}|,\ |V_{GD}|,\ |V_{DS}|\le V_{rule}(device,mode,region),
+\end{equation}
+具体限值与器件类型和工作模式有关。UPF 可表达部分电源意图，但其实现与检查需要相应工具支持\cite{upf}。
+
+ICS55 的 LVS deck 确实包含 ERC 实现：\code{ERC_CHECK}、\code{NWELL_NOT_TO_POWER_CHECK}、\code{PWELL_NOT_TO_GROUND_CHECK} 和 \code{SOFT_CHECK} 为 TRUE，而 \code{GATE_FLOATING_CHECK}、\code{NWELL_FLOATING_CHECK} 和 \code{DFM_ERC_CHECK} 为 FALSE。deck 后半部分按这些开关选择 pTap/nTap、电源/地和浮动节点检查。因此本地证据支持“存在部分可执行 ERC”，具体覆盖必须随开关清单一并引用\cite{pdkrules}。
+
+当前 ECC 没有独立 ERC 步骤或 \code{qor.erc.clean}。报告摘要中的 ERC Violations、Floating Nets 和 Unconnected Pins 属于已有 verification 数据提取。Antenna 与 EMIR 为 advisory，DRV/SDC 检查又各自只覆盖部分电气问题。完整 ERC signoff 仍需记录 deck 版本、开关、运行工具、输入身份和结果；默认关闭的检查不能计入已通过范围。
+
+\section{PPA、IR-drop 与电迁移}
+
+\subsection{动态功耗、内部功耗与漏电}
+
+对 net $i$，常用开关功耗近似为
+\begin{equation}
+P_{switching}=\sum_i\alpha_iC_iV_i^2f_i,
+\end{equation}
+其中 $\alpha_i$ 是有效翻转活动率，$C_i$ 是充放电电容，$V_i$ 是摆幅，$f_i$ 是参考频率\cite{weste}。单元内部还存在短路电流和内部节点充放电，通常由 Liberty power table 建模。
+
+功耗汇总常写为
+\begin{align}
+P_{dynamic}&=P_{internal}+P_{switching},\\
+P_{total}&=P_{dynamic}+P_{leakage},\\
+P_{leakage}&=\sum_iV_iI_{leak,i}.
+\end{align}
+功耗数值必须绑定输入向量/SAIF/VCD、活动率、时钟门控、PVT 视图和库版本。把缺失活动率设为零会制造虚假的低功耗。
+
+ECC 的 PPA CSV 使用 \code{workspace,stage,corner,metric,value,unit,status}，STA 记录 WNS/TNS 和违例数，Power 记录 total/dynamic/leakage，Area 记录 cell/macro/utilization。\code{not_run} 与 \code{unavailable} 保留证据缺口，禁止用零替代。
+
+\subsection{PPA 的联合阅读}
+
+Performance 可由 $F_{target}$、$F_{achieved}$、WNS/TNS/NVP 和 corner coverage 描述；Power 使用上述功耗分解；Area 使用 $A_{cell}$、$A_{macro}$ 和利用率。三者通过电路参数耦合：
+\begin{itemize}
+  \item 增大 driver 可降低延迟，同时增加 cell area、输入电容和动态功耗；
+  \item 增加 CTS buffers 可能改善 skew/transition，同时增加时钟功耗与拥塞；
+  \item 提高利用率可能减少芯片面积，却增加局部布线需求和绕线；
+  \item 降低电压可降低 $CV^2f$ 功耗，也可能增大 cell delay 并压缩 setup 余量。
+\end{itemize}
+因此 PPA 对比需要统一设计身份、corner、约束和工具版本。单一加权分数无法保留这些权衡，逐项 CSV 与原始报告应同时保留。
+
+\subsection{IR-drop}
+
+电源网络上的直流一阶关系为
+\begin{equation}
+V_{cell}=V_{DD}-I_{VDD}R_{VDD}+I_{VSS}R_{VSS},
+\end{equation}
+最后一项表示 ground bounce 对单元参考地的影响。动态分析还需考虑电流波形、封装/片上 L、C 和同时切换。IR-drop 会改变有效驱动电压，进而影响延迟和噪声裕量\cite{weste,enics}。
+
+完整证据需要 PDN 几何、via、电流分布、工作场景和温度。一次功耗总值无法唯一确定局部 $I\cdot R$。
+
+\subsection{Electromigration 与 Black 方程}
+
+电流密度为
+\begin{equation}
+J=\frac{I}{A_{cross}}=\frac{I}{W\,H},
+\end{equation}
+其中 $W$、$H$ 分别为导体宽度和厚度。EM 规则常以平均/RMS/峰值电流及温度限制形式给出，具体口径由 PDK reliability deck 决定。
+
+ICS55 手册第 106 页给出结点温度 $110\,^{\circ}\mathrm{C}$ 下的最大直流电流，技术 LEF 也给出对应的 average DC current-density 限值\cite{pdkrules}：
+\begin{center}
+\small
+\begin{tabular}{lll}
+\toprule
+对象 & 最大直流电流 & 单位 \\
+\midrule
+MET1 / METn & 1.5 / 1.7 & mA/$\mu$m \\
+T2Mn / T4Mn / T8Mn & 4.5 / 8.1 / 27 & mA/$\mu$m \\
+CT（0.09 $\times$ 0.09） & 0.29 & mA/unit \\
+VIAn（0.09 $\times$ 0.09） & 0.135 & mA/unit \\
+T2Vn（0.2 $\times$ 0.2） & 0.79 & mA/unit \\
+T4Vn、T8Vn（0.36 $\times$ 0.36） & 3.2 & mA/unit \\
+\bottomrule
+\end{tabular}
+\end{center}
+金属限值需要与实际线宽和温度共同使用，CT/Via 限值需要与数量及并联结构共同使用。叠层孔按路径中最小 $I_{max}$ 取值；手册列出的 CT--VIAn、VIAn--VIAn 以及 VIAn 到 T2Vn/T4Vn/T8Vn 组合均为 0.135 mA/stack。上述数据只覆盖声明的直流和温度条件。当前未找到 AC/RMS/peak current-density 模型、完整 PDN 电流分布或实际 EMIR 报告，因此不能由阈值表推出 IR/EM signoff 通过。
+
+Black 方程常用形式为\cite{black}
+\begin{equation}
+MTTF=A_BJ^{-n}\exp\!\left(\frac{E_a}{kT}\right),
+\end{equation}
+其中 $A_B$ 为经验系数，$n$ 为电流密度指数，$E_a$ 为激活能，$k$ 为 Boltzmann 常数，$T$ 为绝对温度。$A_B$、$n$、$E_a$ 必须来自匹配工艺与失效判据的模型。该公式说明温度和电流密度对寿命的敏感性，也提醒我们不能拿通用经验常数替代 ICSProut55 规则。
+
+ECC 集成测试明确使用 synthetic EMIR technology file 来演练流程，见 \code{test/integration/test_rtl2gds_flow.py}:20--29。该结果可验证软件链路，不能充当真实 IR/EM 签核。
+
+\section{Harden 与统一 Signoff 证据}
+
+\subsection{GDS、LEF、LIB 的一致性}
+
+Harden 输出的三类文件服务于不同工具：
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.17\textwidth}p{0.31\textwidth}X}
+\toprule
+产物 & 主要内容 & 一致性检查 \\
+\midrule
+GDS & 最终多边形、层和层次实例 & 与接受 DRC/LVS 的 layout 同版本；filler、antenna fix 和最终物理单元均已包含。 \\
+Abstract LEF & MACRO 尺寸、site、pins、OBS、层 & 与 GDS 外形和 pins 对齐，供 P\&R 抽象使用；不承载完整晶体管多边形。 \\
+Liberty LIB & cell/pin、timing arcs、power 和 corner views & 与网表功能、单元命名、STA 视图及 PDK 模型一致。 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+三类文件存在并不能证明其内容一致。人工检查应包括 MACRO/cell 名称、pin 方向、供电引脚、时钟弧、面积、原点、层映射和版本身份。旧 Harden checklist 中位于提前返回后的 LEF/LIB token 检查不计入当前自动覆盖。
+
+\subsection{ECC 质量门和 checklist 的最小总表}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.17\textwidth}p{0.35\textwidth}X}
+\toprule
+对象 & 当前真实 gate/证据 & 原理对应 \\
+\midrule
+DRC & \code{qor.drc.clean}，\code{drc_count==0} & 所有启用的几何谓词通过，工具和报告有效。 \\
+LVS & \code{qor.lvs.clean}，\code{lvs_count==0} & 提取图与参考图匹配。 \\
+RCX & corner coverage、SPEF parse health & $\mathbb{A}=\mathbb{E}$，寄生网络可读取。 \\
+STA & setup/hold closed & coverage、状态、WNS/TNS、NVP 同时满足。 \\
+LEC & 当前 proven proof 与 hash/path/size & miter 在指定模型下不可满足，输入未变化。 \\
+Harden & GDS/LEF/LIB artifacts；条件性 MPC area gates & 交付视图一致，面积规则仅在适用配置解释。 \\
+Placement/CTS & raw metrics、流程和人工评审 & 线长/密度、skew/latency 等需要结合后续结果。 \\
+ERC/EMIR & advisory/外部检查边界 & 需要实际规则 deck、场景和可靠性模型。 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+Checklist 的阻塞语义为
+\begin{equation}
+blocked(item)\Longleftrightarrow policy=block
+\land state\in\{failed,unavailable\}.
+\end{equation}
+整体 \code{ready} 表示当前聚合规则没有阻塞或注意项，其证明范围受规则覆盖限制。Foundry tapeout certification 还要求真实 PDK 规则、外部签核和责任人批准。
+
+Signoff package 应把 initial RTL/SDC、db/rcx/sta 配置、最终 Verilog/DEF/GDS、SPEF、STA 报告、LEC 证明和 GDS/LEF/LIB 放在同一身份链中。\code{ecc signoff check} 提供只读检查，\code{ecc signoff export} 在 readiness 不足时拒绝导出。\code{ecc signoff inspect} 即使发现 blocked 也返回 rc=0，自动化脚本需要读取状态内容。
+
+\section{健全测试软件架构与 ECC 现状对比}
+
+\subsection{测试架构的目标：独立 Oracle 与证据分层}
+
+成熟测试架构应把“被测实现”和“判定正确的 Oracle”分离。Oracle 可以来自数学公式、独立参考实现、已知答案的 golden fixture、差分工具或形式不变量。只把当前输出保存为 snapshot，会同时固化正确行为和错误行为，必须配合人工确认的契约。
+
+测试分层建议参考 ISO/IEC/IEEE 29119 的测试过程与文档思想，以及 Ammann/Offutt 的覆盖与变异测试方法\cite{iso29119,testing}：
+\begin{enumerate}
+  \item \textbf{单元层}：纯函数、parser、单位和边界条件，要求快速、确定、无外部 EDA 工具依赖。
+  \item \textbf{契约层}：schema、CLI、文件格式、版本迁移、错误码和 golden cases。
+  \item \textbf{适配器集成层}：真实工具进程、环境变量、日志解析、失败传播和超时。
+  \item \textbf{设计流程层}：小型 GCD 与真实 ICSProut55 PDK，验证跨步骤输入/输出和当前身份。
+  \item \textbf{ packaged E2E 层}：使用交付二进制和锁定工具/PDK，验证用户实际安装形态。
+  \item \textbf{签核与故障层}：注入缺失、空文件、截断、错版本、旧 hash、缺 corner 和真实违例，证明 gate 会失败。
+  \item \textbf{回归与非功能层}：多设计、多配置、性能、内存、确定性、flakiness 和历史趋势。
+\end{enumerate}
+
+\subsection{当前架构与目标架构对照}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.16\textwidth}p{0.34\textwidth}p{0.20\textwidth}X}
+\toprule
+层次 & ECC 当前静态证据 & 已有能力 & 建议补强 \\
+\midrule
+单元与组件 & \code{test/conftest.py}:9--13；大量 \code{test_*.py} & 默认禁用 step subprocess，以内存状态测试组件 & 保持纯函数隔离；为公式增加符号、单位和极端值参数化测试。 \\
+契约与 Golden & QoR schema、PPA collector、signoff package/report 等测试 & 覆盖 schema、导出、报告和错误输入 & 建立跨版本 golden 清单、独立解析器和 malformed/fuzz 输入矩阵。 \\
+工具集成 & \code{test/integration/test_rtl2gds_flow.py} & 标记 integration/pdk，调用真实流程 & CI 必需场景避免静默 skip；对工具版本和日志 Oracle 做强断言。 \\
+真实 PDK & \code{test/pdk_runtime.py}；CI \code{pdk} job & 检查关键 LEF/LIB，获取锁定 commit/release & 增加真实可靠性 deck 与独立参考结果；minimal fixture 不承担物理正确性。 \\
+Packaged E2E & \code{.github/workflows/ci.yml}:773--903 & PyInstaller 二进制、自托管 runner、设计矩阵、lit 和 signoff export & 对 quarantine/excluded design 设置 owner 与恢复条件，扩展跨 PDK 支持矩阵。 \\
+故障与 stale & LEC hash/stale、RCX、STA、checklist、state-machine regression 测试 & 已覆盖多类失效和 advisory 行为 & 将故障注入推广为逐 gate 的统一矩阵，并做实现变异测试。 \\
+CI 质量 & \code{pytest --cov}、lint、类型检查、artifact logs & 有覆盖报告、日志上传和版本锁定 & 增加明确的 coverage/mutation 阈值及趋势告警；防止只报告不阻断。 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+ECC 已经具备真实 PDK、打包二进制 E2E、依赖 hash/commit 锁定、失败日志和大量 signoff 测试。目标架构的重点是提高 Oracle 独立性和故障覆盖系统性，避免重复建设已有层次。
+
+\subsection{逐 Gate 故障矩阵}
+
+每类 gate 至少应有正向、反向和不可判定测试：
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.19\textwidth}p{0.31\textwidth}X}
+\toprule
+对象 & 必须通过的注入测试 & 期望 Oracle \\
+\midrule
+DRC/LVS & 0、正数、缺失、空报告、工具失败、旧输入 & 仅有效零违例通过；工具失败和 unknown 不得变成 clean。 \\
+RCX & 缺 corner、重复 corner、SPEF 截断、异常 R/C & 集合不完整或 parse failure 必须失败/unknown。 \\
+STA & 正负 WNS/TNS、NVP 非零、缺 hold、截断 WNS & setup/hold 独立判定；Fmax 不越过缺失证据。 \\
+LEC & 改一个网表字符、换路径、旧 SHA、unknown & 当前身份不匹配即 stale；非 proven 不通过。 \\
+Checklist & block/warn、missing/empty、schema 损坏 & blocked 公式和 advisory 语义与规范一致。 \\
+PPA & not\_run、unavailable、单位变化、混合 corner & 缺失不补零，单位显式转换，非法混合被拒绝。 \\
+Package & 复制失败、版本错配、partial archive、旧证明 & 拒绝误导性 export，manifest 可追溯到当前身份。 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+ECC 的测试目录已经包含多组此类案例，例如 \code{test/test_signoff_package.py} 的 stale LEC、\code{test/tools/ecc/test_rcx_artifacts.py} 和 \code{test/tools/ecc/test_sta_qor.py}。建议把这些案例抽象为覆盖矩阵，逐项标明每个 gate 是否拥有 missing、malformed、stale、negative 和 boundary 测试。
+
+\subsection{变异测试与覆盖指标}
+
+语句覆盖率只说明代码执行过，无法证明断言能发现错误。变异测试对实现施加小改动，例如把 $>$ 改为 $\ge$、把 expected/missing corner 判断反转、把 stale 检查删除，再观察测试是否失败：
+\begin{equation}
+Mutation\ Score=\frac{Killed\ Mutants}
+{Total\ Mutants-Equivalent\ Mutants}\times100\%.
+\end{equation}
+Equivalent mutant 与原实现行为等价，需要人工或工具排除\cite{testing}。对 signoff gate，边界变异尤其重要，因为 $WNS=0$、空 corner 集合和空文件都可能改变安全结论。
+
+当前 CI 在 \code{.github/workflows/ci.yml}:227--256 运行 coverage 并发布 summary，静态配置未显示强制 \code{--cov-fail-under} 或 mutation score 阈值。可将关键 gate 的分支覆盖、变异分数和故障矩阵完成度设为明确质量门，普通 UI/辅助代码采用不同阈值。
+
+\subsection{仍需增加的高价值测试}
+
+\begin{enumerate}
+  \item \textbf{独立频率 Oracle}：用正负 slack、正余量、截断 WNS、多 corner 和非法 $T-S\le0$ 验证式\eqref{eq:fmax}，检查单位 MHz/ns；另为 PLL 的 $N/s/\mathrm{OD}$ 枚举、VCO 边界、无合法配置、guardband、最终候选失败和无推荐结果建立独立测试。
+  \item \textbf{跨工具差分}：同一 SPEF/Liberty/SDC 在独立 parser 或 STA 引擎上比较路径和 corner 摘要，允许容差需有数值依据。
+  \item \textbf{真实 ERC/IR/EM 验收}：使用对应 ICSProut55 规则与模型，将 synthetic 流程测试和物理签核测试分开报告。
+  \item \textbf{Quarantine 管理}：CI 静态注释中 \code{xtea} 因 hold WNS 为负被排除，见 \code{.github/workflows/ci.yml}:756--769。应记录责任人、原因、失效测试和恢复门槛。
+  \item \textbf{跨 PDK 合同}：默认 pytest deselect 了 SG13G2 集成测试，见 \code{pyproject.toml}:112--123。若项目声明多 PDK 支持，应把可用能力、 nightly 矩阵和发布阻塞条件显式分层。
+  \item \textbf{变异与模糊测试}：重点覆盖 JSON schema、SPEF/Liberty parser、CLI 和路径身份，避免测试只复制实现假设。
+\end{enumerate}
+
+\section{GCD：把原理落到一份可执行 Checklist}
+
+GCD 适合作为小型教学案例：一个时钟域、34 个 CK sinks、控制器和 A/B 数据通路，没有 SRAM 或其他 hard macro。以下顺序把课程知识与 ECC 证据串起来。
+
+\begin{enumerate}
+  \item \textbf{锁定来源}：记录 RTL/SDC hash、ECC commit、ICSProut55 release/commit、Liberty/LEF/RCX/STA 配置。
+  \item \textbf{读懂电路}：从 RTL 找出 launch/capture registers、组合云、时钟 root 和 clock sinks；若遇到 GCLK/NCLK，沿驱动电路判断含义。
+  \item \textbf{Placement}：用 HPWL/FLUTE/GRWL 解释线长估计，用 overflow 和密度图检查可布线性。
+  \item \textbf{CTS}：检查 34 sinks、buffer 树、skew/latency/transition 和时钟功耗，确认 post-CTS propagated clock。
+  \item \textbf{Routing/RCX}：检查 opens/shorts、当前 GDS/DEF、期望 SPEF 集合和 parse health，理解 R/C 如何进入 STA。
+  \item \textbf{STA/Fmax}：逐 corner 阅读 setup/hold WNS/TNS/NVP；用 $1000/(T-S)$ 解释 Achieved Fmax，并检查未截断 slack、corner coverage 和非法输入。若要给推荐频率，按合法时钟配置逐点重跑 STA 和全部阻塞性 gates，再加入明确 guardband 并复验最终点。
+  \item \textbf{DRC/LVS/LEC}：分别核对几何 clean、提取连接 clean 和当前等价证明，保留各自输入版本。
+  \item \textbf{PPA}：按同一 corner/revision 读取功耗分解、面积和时序，保留 unavailable/not\_run。
+  \item \textbf{ERC/Antenna/EMIR}：列出规则来源和模型，synthetic 数据仅用于软件流程测试。
+  \item \textbf{Harden/package}：核对 GDS/LEF/LIB 与最终网表、DEF、SPEF、LEC 和 STA 的身份，审阅 blocked items 后再 export。
+\end{enumerate}
+
+\section{仍需补足的知识与工程证据}
+
+本报告已经展开主要术语、公式、微电图例、ICS55 本地证据和测试方法，以下工作需要额外数据或专门报告才能继续深入：
+\begin{itemize}
+  \item \textbf{晶体管级时钟源设计}：DLL/PLL 的 PFD、charge pump、VCDL/VCO 尺寸、环路稳定性、jitter 和 lock time 需要模拟电路原理图、模型与仿真结果。本报告的图\ref{fig:dll} 用于体系结构教学；\code{PLL_TOP} 的公共 Liberty 没有 timing arcs，还需匹配的特征化时序模型和 generated-clock 约束。
+  \item \textbf{标准单元库载荷与完整性}：本地已有规则手册、DRC/LVS/Antenna deck、部分 ERC 和 DC EM 限值；当前工作树仍缺 v2 Liberty/GDS 载荷，也没有 ECC 所需 v1/H7C 目录。需要按锁定 release/commit 安装并校验资产，再验收全部 cell/PVT 内容。
+  \item \textbf{完整 RCX、IR/EM 与可靠性}：技术 LEF 的基础 R/C 和直流 EM 阈值已经可引用，完整 RC corner kit、PDN 电流场景、AC/RMS/peak EM、实际 EMIR 报告以及硅测试和可靠性认证仍不足。
+  \item \textbf{真实 signoff QoR}：$F_{verified}$、$F_{recommended}$、功耗、面积和可靠性结论需要当前 workspace 的多 corner 报告与全 gate 复验；静态源码只能定义计算方法，本报告数值例不能充当设计实测结果。
+  \item \textbf{CDC/SI/UPF 专项}：多时钟、多电压和 aggressor-aware SI 超出单时钟 GCD 的覆盖范围，应使用专门设计和工具流程。
+  \item \textbf{测试有效性}：覆盖率阈值、变异测试、独立参考 Oracle、真实 EMIR 和跨 PDK 发布矩阵仍需按上述优先级补强。
+\end{itemize}
+
+\begin{thebibliography}{99}
+
+\bibitem{enics}
+ENICS Labs.
+\newblock \emph{Digital VLSI Design}, Lectures 3--11，尤其 5、7、8、9、11。
+\newblock 课程页：\url{https://enicslabs.com/academic-courses/dvd-english/}；本地目录快照：\code{/home/kernel_dev/cc/w/dvd-english.html}。
+
+\bibitem{weste}
+Neil H. E. Weste and David Money Harris.
+\newblock \emph{CMOS VLSI Design: A Circuits and Systems Perspective}.
+\newblock 4th edition, Pearson, 2011. CMOS、互连、时序、时钟与功耗基础。
+
+\bibitem{baker}
+R. Jacob Baker.
+\newblock \emph{CMOS Circuit Design, Layout, and Simulation}.
+\newblock 3rd edition, Wiley-IEEE Press, 2010. 反相器、时钟与 DLL/PLL 相关电路背景。
+
+\bibitem{liberty}
+Synopsys.
+\newblock \emph{Liberty Reference Manual}.
+\newblock Liberty library、timing arc、lookup table、operating conditions 与 power model 的格式依据；具体版本应匹配所用工具。
+
+\bibitem{lefdef}
+Cadence Design Systems / Si2.
+\newblock \emph{LEF/DEF Language Reference}.
+\newblock Library Exchange Format 与 Design Exchange Format 的物理抽象和设计数据语义。
+
+\bibitem{spef}
+IEEE 1481.
+\newblock \emph{Standard for Integrated Circuit (IC) Delay and Power Calculation System}.
+\newblock 与 SPEF 寄生描述和延迟/功耗计算体系相关的标准；实际解析还需遵循工具支持的 SPEF 版本。
+
+\bibitem{sdc}
+Synopsys.
+\newblock \emph{PrimeTime User Guide and Synopsys Design Constraints (SDC) Documentation}.
+\newblock Clock、I/O delay、timing exception、uncertainty 和报告语义。
+
+\bibitem{flute}
+Chris Chu and Yiu-Chung Wong.
+\newblock FLUTE: Fast Lookup Table Based Rectilinear Steiner Minimal Tree Algorithm for VLSI Design.
+\newblock \emph{IEEE Transactions on Computer-Aided Design of Integrated Circuits and Systems}, 27(1):70--83, 2008.
+
+\bibitem{dreamplace}
+Yibo Lin et al.
+\newblock DREAMPlace: Deep Learning Toolkit-Enabled GPU Acceleration for Modern VLSI Placement.
+\newblock \emph{Proceedings of the 56th ACM/IEEE Design Automation Conference (DAC)}, 2019.
+
+\bibitem{elmore}
+W. C. Elmore.
+\newblock The Transient Response of Damped Linear Networks with Particular Regard to Wideband Amplifiers.
+\newblock \emph{Journal of Applied Physics}, 19(1):55--63, 1948.
+
+\bibitem{sat}
+Armin Biere, Marijn Heule, Hans van Maaren, and Toby Walsh, editors.
+\newblock \emph{Handbook of Satisfiability}.
+\newblock IOS Press, 2009. SAT、UNSAT 与形式验证基础。
+
+\bibitem{black}
+J. R. Black.
+\newblock Electromigration---A Brief Survey and Some Recent Results.
+\newblock \emph{IEEE Transactions on Electron Devices}, 16(4):338--347, 1969.
+
+\bibitem{upf}
+IEEE 1801.
+\newblock \emph{Standard for Design and Verification of Low-Power, Energy-Aware Electronic Systems}.
+\newblock Unified Power Format（UPF）及电源意图背景；引用该标准不表示 ECC 当前自动支持全部 UPF 流程。
+
+\bibitem{gds}
+Calma / Cadence Design Systems.
+\newblock \emph{GDSII Stream Format Documentation}.
+\newblock GDSII 流格式的层、结构和几何数据背景；实际导入导出以工具版本和层映射为准。
+
+\bibitem{pdk}
+OpenECOS Projects.
+\newblock \emph{ICSProut55 PDK}.
+\newblock 仓库：\code{git@github.com:openecos-projects/icsprout55-pdk.git}。
+ECC 锁定 release \code{v1.10.103}，commit \code{4f0a4124e3528163f6805e464a0f2fc4587549ec}，见 \code{.github/revision.toml}:30--33；当前本地快照位于 \code{/home/kernel_dev/w/ics55}。
+
+\bibitem{pdkrules}
+ICsprout / Zhejiang University / ECOS.
+\newblock \emph{ZJCX 55nm Design Rule Manual\_V1.1.9} 与 ICS55 物理验证数据。
+\newblock 本地文件：\code{/home/kernel_dev/w/ics55/docs/ZJCX 55nm Design Rule Manual_V1.1.9.pdf}，尤其第 104--106 页 Antenna 与 DC EM；对应 \code{pv/DRC/}、\code{pv/LVS/} decks 和 \code{prtech/techLEF/N551P6M_ecos.lef}。
+
+\bibitem{pdklibaudit}
+OpenECOS Projects.
+\newblock \emph{Standard-cell Liberty timing-sense correction audit}.
+\newblock 2026-10-14，本地文件：\code{/home/kernel_dev/w/ics55/docs/liberty-timing-sense-audit-2026-10-14.md}。记录 H7CH/H7CL/H7CR 的 timing-arc 审核、修正及 PVT 内容缺口。
+
+\bibitem{pll}
+OpenECOS Projects.
+\newblock \emph{ICS55 ECOS PLL: PLL\_TOP Public Integration Views}, PLL\_V02p1.
+\newblock 本地说明与数据：\code{/home/kernel_dev/w/ics55/IP/PLL/ics55_ecos_pll/README.md} 及同目录 Verilog、LEF、Liberty；频率公式、合法范围和“Liberty 无 timing arcs”的限制以此为准。
+
+\bibitem{ecc}
+ECOS Chip Compiler（ECC）本地源码与文档。
+\newblock \code{/home/kernel_dev/w/ecc}。
+本文引用 \code{chipcompiler/}、\code{test/}、\code{docs/} 和 \code{.github/workflows/ci.yml} 的静态实现，不引用未读取的运行结果。
+
+\bibitem{iso29119}
+ISO/IEC/IEEE 29119.
+\newblock \emph{Software and Systems Engineering---Software Testing}.
+\newblock 测试过程、文档、技术和关键词的系列标准。
+
+\bibitem{testing}
+Paul Ammann and Jeff Offutt.
+\newblock \emph{Introduction to Software Testing}.
+\newblock 2nd edition, Cambridge University Press, 2016. 覆盖、测试 Oracle 与变异测试方法。
+
+\end{thebibliography}
+
+\end{document}

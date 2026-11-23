@@ -1,0 +1,400 @@
+\documentclass[UTF8,a4paper,11pt,fontset=fandol]{ctexart}
+
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs,array,tabularx}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!45!black,
+  urlcolor=blue!55!black
+}
+\setlist{itemsep=0.35em,topsep=0.35em}
+\renewcommand{\arraystretch}{1.25}
+\setlength{\emergencystretch}{1.5em}
+\newcommand{\code}[1]{\nolinkurl{#1}}
+
+\title{ECOS Chip Compiler 中的时钟树综合\\项目结构、GCD 示例与检查清单}
+\author{基于 ECC 仓库与 ENICS Digital VLSI Design 第 8 讲}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本文中的 ECC 指 ECOS Chip Compiler，而不是纠错码（Error-Correcting Code）。文章以仓库中的 GCD 示例为对象，说明 ECC RTL-to-GDS 流程中时钟树综合（Clock Tree Synthesis，CTS）的位置、时钟网络的物理意义、GCD 的真实 clock sinks 和关键时序路径，以及项目配置和持续集成所表达的验收要求。本文只依据源代码、配置和 CI 流水定义阐述结构及原理，不把任何一次运行的实测 QoR 当作既定事实；实际 CI 结果应另外通过 GitHub CLI 查看。
+\end{abstract}
+
+\tableofcontents
+
+\section{文档范围与项目结构}
+
+ECOS Chip Compiler 是开源芯片设计自动化工具链，集成 Yosys、ECC-DreamPlace、ECC-Tools 和 KLayout，形成 RTL-to-GDS 流程，并提供 \code{ecc} CLI 与 \code{chipcompiler} Python API。见 \path{README.md}:20--29。
+
+除特别说明外，本文中的文件路径均相对于：
+\begin{center}
+\path{/home/kernel_dev/w/ecc}
+\end{center}
+
+与 CTS 直接相关的主要文件如下。
+
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.43\textwidth}X}
+\toprule
+文件 & 作用 \\
+\midrule
+\path{docs/examples/gcd/gcd.v} & GCD 示例 RTL，定义时钟、寄存器、控制器和数据通路 \\
+\path{docs/examples/gcd/ics55flow.py} & 简化的 GCD Python 流程示例和工作区目录说明 \\
+\path{chipcompiler/rtl2gds/builder.py} & 完整 RTL-to-GDS 步骤编排 \\
+\path{chipcompiler/tools/ecc/configs/cts_ecc.json} & CTS 默认约束预算和布线层配置 \\
+\path{chipcompiler/data/workspace/sdc.py} & 生成时序约束、电气约束及 post-CTS propagated clock 设置 \\
+\path{chipcompiler/tools/ecc/timing_constraints.py} & 按流程位置选择 pre-CTS 或 post-CTS 约束 \\
+\path{chipcompiler/tools/ecc/metrics.py} & 定义 CTS QoR 指标名称 \\
+\path{.github/workflows/ci.yml} & 测试、打包、E2E、signoff 产物检查和 Nix 构建质量门 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+这里要区分两个层次：
+\begin{enumerate}
+  \item \textbf{设计原理}：GCD RTL 中有什么寄存器和数据路径，CTS 为什么需要存在；
+  \item \textbf{流程验收}：ECC 怎样配置、执行并通过 CI 检查 CTS 及后续物理实现产物。
+\end{enumerate}
+
+\section{GCD 示例的真实时钟与数据通路}
+
+\subsection{顶层接口和模块划分}
+
+GCD 顶层只有一个时钟 \code{clk} 和同步、 active-high 的 \code{reset}。请求接口包含 \code{req_msg}、\code{req_val} 和 \code{req_rdy}；响应接口包含 \code{resp_msg}、\code{resp_val} 和 \code{resp_rdy}。控制器 \code{GcdUnitCtrlRTL} 与数据通路 \code{GcdUnitDpathRTL} 共用同一个时钟。见 \path{docs/examples/gcd/gcd.v}:11--21、37--98。
+
+该设计不是多级流水阵列，而是迭代式 GCD：FSM 在 IDLE、CALC 和 DONE 状态间转换，A、B 寄存器在 CALC 阶段反复更新。
+
+\subsection{Clock sinks}
+
+设计中的时序状态由以下寄存器构成：
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+寄存器组 & 位数 & CTS 中的意义 \\
+\midrule
+FSM state & 2 & 控制器状态寄存器的 CK sinks \\
+A register & 16 & 数据通路 A 寄存器的 CK sinks \\
+B register & 16 & 数据通路 B 寄存器的 CK sinks \\
+\midrule
+合计 & \textbf{34} & 同一 \code{clk} 域内的预期 sinks \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+对应 RTL 见 \path{docs/examples/gcd/gcd.v}:109--160、192--223、369--540。原生映射 fixture 也显示 34 个 \code{DFFQX1H7L} 的 \code{CK} 直接连接到 \code{clk}，说明 CTS 输入是一根高扇出时钟网络，而不是已经建好的时钟树。
+
+CTS 前后可以抽象为：
+\begin{verbatim}
+CTS before:                       CTS after:
+
+clk -- high-fanout net --+-- FSM.CK       clk -- buffer tree --+-- FSM.CK
+                         +-- A.CK                              +-- A.CK
+                         +-- B.CK                              +-- B.CK
+\end{verbatim}
+
+这里的目标不是增加流水级，也不是改变 GCD 算法，而是在物理布局的基础上构造合法、可控的时钟分配网络。
+
+\subsection{关键数据路径}
+
+A、B 寄存器输出进入减法器和比较器，结果再经过 \code{Mux2}/\code{Mux3}、寄存器 enable 和控制选择逻辑返回 A、B。FSM 产生的控制信号也参与这些 register-to-register 路径。见 \path{docs/examples/gcd/gcd.v}:277--317、369--540、588--756。
+
+\begin{verbatim}
+A/B registers -> subtract/compare -> mux/select/enable -> A/B registers
+       |                                                       |
+       +---------------- same clk domain ----------------------+
+\end{verbatim}
+
+因此，CTS 后的重点是 A/B 反馈路径和 FSM 控制路径的 setup、hold，而不是只看一个全局平均 skew。
+
+\subsection{当前示例中不存在的结构}
+
+GCD RTL 中没有 PLL、时钟分频器、generated clock、clock mux、ICG、SRAM 或其他 hard macro，也没有内部异步时钟域。通用流程存在 macro-placement 步骤，并不意味着 GCD 一定包含宏。
+
+外部请求、响应和复位信号没有在本模块内部添加同步器，因此其安全性依赖外部接口与 \code{clk} 的同步假设。不能由“单时钟 RTL”进一步推断板级接口一定没有 CDC/RDC 问题。
+
+\section{CTS 的物理与时序原理}
+
+\subsection{为什么高扇出时钟不能直接当作理想网络}
+
+综合和早期时序分析可以把 \code{clk} 当作 ideal clock，但物理实现中，时钟必须经过 buffer 和互连线到达 34 个 CK 引脚。不同分支的线长、负载和 buffer 级数会产生不同的到达时间，并带来 transition、capacitance 和 fanout 约束问题。
+
+CTS 的职责是在满足电气约束的同时控制：
+\begin{itemize}
+  \item clock skew 和 insertion latency；
+  \item buffer、sinks 的 transition；
+  \item clock net 的 capacitance 和 fanout；
+  \item buffer 数量、面积、时钟线长和后续布线资源。
+\end{itemize}
+
+CTS 不会缩短减法器、比较器或 mux 的组合逻辑延迟；它改变的是 launch/capture 寄存器的时钟到达时间。
+
+\subsection{Insertion delay、skew 和 jitter}
+
+\textbf{Insertion delay（或 clock latency）}是从 clock root 到某个 sink 的延迟。对同一域内的一对寄存器，公共时钟路径延迟通常会抵消，因此两者之间的 skew 更直接地影响局部时序；但总 latency 仍会影响 I/O、接口预算、功耗和后续 signoff。
+
+定义 capture 与 launch 寄存器的时钟到达时间差为：
+\[
+  s=t_{\mathrm{capture}}-t_{\mathrm{launch}}.
+\]
+
+\textbf{Skew} 是空间上不同 sinks 的到达时间差；\textbf{jitter} 是同一个时钟边沿随时间的变化。零 skew 不代表零 jitter，也不自动代表 setup/hold 已收敛。
+
+\subsection{用 A 到 B 路径理解 setup 和 hold}
+
+若 A 寄存器启动数据、B 寄存器捕获数据，令
+\[
+  s=t_{B.CK}-t_{A.CK}.
+\]
+暂时省略 uncertainty、OCV 和 SI 项，则：
+\[
+  \mathrm{SetupSlack}
+  =T+s-\left(T_{\mathrm{cq,max}}+
+  T_{\mathrm{sub/cmp/mux,max}}+T_{\mathrm{setup}}\right),
+\]
+\[
+  \mathrm{HoldSlack}
+  =T_{\mathrm{cq,min}}+T_{\mathrm{sub/cmp/mux,min}}
+  -s-T_{\mathrm{hold}}.
+\]
+
+正 skew 给当前路径更多 setup 时间，却会压缩当前路径的 hold 余量；对反方向路径，作用相反。这就是课件中 useful skew 和 CCOpt 的理论基础：时钟与数据路径可以协同优化，而不是孤立追求所有 sinks 同时收到时钟。
+
+不过，当前配置的存在并不能证明某次 GCD 流程启用了特定 CCOpt 策略。对项目结构的说明应与实际工具能力或运行结果分开。
+
+此外，\textbf{迭代运算不自动等于 multicycle path}。除非架构和约束明确规定一次运算可以跨多个周期更新同一组寄存器，否则不能为了给 A/B 路径增加时间而添加 multicycle exception。
+
+\section{CTS 在 ECC 流程中的位置}
+
+GCD 简化示例按以下顺序注册步骤：
+\begin{verbatim}
+Synthesis -> PreFloorplan -> MacroPlacement -> PostFloorplan
+-> Placement -> CTS -> Legalization -> Routing -> Filler
+\end{verbatim}
+见 \path{docs/examples/gcd/ics55flow.py}:77--93。
+
+完整 builder 还包含 LEC、preplace、diff sizing、可选 timing optimization、LVS、DRC、RCX、STA、功耗和 EMIR 等步骤。关键先后关系仍是：
+\[
+  \text{Placement}\rightarrow\text{CTS}\rightarrow
+  \text{Legalization}\rightarrow\text{Routing}\rightarrow
+  \text{RCX}\rightarrow\text{STA}.
+\]
+见 \path{chipcompiler/rtl2gds/builder.py}:100--130。
+
+这带来三个结论：
+\begin{enumerate}
+  \item CTS 使用 placement 提供的物理位置，不能脱离布局谈树形和线长；
+  \item legalization 和 routing 仍可能改变时钟网络，CTS 阶段的估计不是最终结果；
+  \item 最终结论必须由 post-route RCX/STA 和物理验证共同支持。
+\end{enumerate}
+
+ECC 按步骤在完整流程中的位置选择 pre-CTS 或 post-CTS 约束。post-CTS 约束加入：
+\begin{center}
+\code{set_propagated_clock [all_clocks]}
+\end{center}
+自定义约束入口则相应生成 \code{pre_CTS}/\code{post_CTS} 包装。见 \path{chipcompiler/tools/ecc/timing_constraints.py}:18--40 和 \path{chipcompiler/data/workspace/sdc.py}:101--114、203--205。
+
+\section{项目中的 CTS 与时序配置}
+
+\subsection{CTS 默认配置}
+
+\path{chipcompiler/tools/ecc/configs/cts_ecc.json}:1--10 给出：
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+参数 & 默认值 & 含义 \\
+\midrule
+\code{skew_bound} & 0.08 ns & 允许的 clock skew 上界，即 80 ps \\
+\code{max_buf_tran} & 0.5 ns & clock buffer 最大 transition \\
+\code{root_input_slew} & 0 ns & clock root 输入 slew 假设 \\
+\code{max_sink_tran} & 0.5 ns & clock sinks 最大 slew \\
+\code{max_cap} & 0.15 pF & buffer 最大负载电容预算 \\
+\code{max_fanout} & 32 & clock buffer 最大 fanout 预算 \\
+\code{routing_layer} & [4,5] & MET4--MET5 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+单位和字段含义也见 \path{chipcompiler/docs/ecc-config-ref.en.md}:829--842。
+
+34 个预期 sinks 在数量上大于 fanout 预算 32，因此 fanout 是静态检查时的重点项目；但不能仅由 $34>32$ 推断实际 buffer 数量或树形，实际拓扑应由工具产物说明。
+
+ICS55 PDK 提供的候选 clock buffers 为 \code{BUFX8H7L}、\code{BUFX12H7L}、\code{BUFX16H7L} 和 \code{BUFX20H7L}，见 \path{chipcompiler/data/pdk.py}:367--394。工作区生成时将这些单元注入 CTS 配置。
+
+\subsection{区分两套 GCD 时钟配置}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.42\textwidth}llX}
+\toprule
+配置来源 & Top & Clock & 周期 \\
+\midrule
+文档示例设计参数 & \code{gcd} & \code{clk} & 100 MHz，10 ns \\
+原生 ECC-Tools GCD fixture & \code{gcd} & \code{clk} & 50 MHz，20 ns \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+文档示例参数见 \path{chipcompiler/data/parameter.py}:107--117。原生 fixture SDC 见：
+\begin{quote}
+\path{chipcompiler/thirdparty/ecc-tools/test/fixtures/gcd/config/gcd.sdc}:3--9
+\end{quote}
+二者可以用于不同测试目的，但不能把它们的约束和 QoR 混为同一次运行。
+
+\subsection{生成的 SDC 还包含什么}
+
+对 legacy 单时钟路径，生成约束包含：
+\begin{itemize}
+  \item setup uncertainty 0.2 ns、hold uncertainty 0.1 ns；
+  \item clock-path max transition 为周期的 17\%；
+  \item data-path max transition 为周期的 34\%；
+  \item design-level max fanout 32；
+  \item post-CTS 阶段设置 propagated clocks。
+\end{itemize}
+见 \path{chipcompiler/data/workspace/sdc.py}:176--205。
+
+没有 IO cells 时，生成的接口约束使用 virtual clock，输入和输出 delay 的 max/min 预算分别为周期的 60\%/30\%。其中还存在 input-to-output 的 multicycle 规则，但它们只针对端口到端口路径，不能据此把 A/B 迭代反馈路径声明为 multicycle。见 \path{chipcompiler/data/workspace/sdc.py}:258--340。
+
+iCTS 还会读取 SDC 中的电气约束，并让设计级约束优先于 CTS 配置预算。因此，阅读配置时必须区分“JSON 中写了什么”和“工具最终采用了什么”。相关实现位于：
+\begin{itemize}
+  \item \path{chipcompiler/thirdparty/ecc-tools/src/operation/iCTS/source/data_manager/DataManager.cc}:127--151；
+  \item \path{chipcompiler/thirdparty/ecc-tools/src/operation/iCTS/source/data_manager/config/ConstraintBudgets.cc}:59--84。
+\end{itemize}
+
+\section{ENICS 第 8 讲与当前项目的对应关系}
+
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.26\textwidth}p{0.30\textwidth}X}
+\toprule
+课件主题 & 在 ECC/GCD 中的对应 & 边界 \\
+\midrule
+8a：CTS 基本概念 & 单根 \code{clk} 到 34 个 CK sinks 的 buffer tree & 不改变 GCD 算法和数据通路 \\
+8b：Clock Distribution & 当前配置体现缓冲时钟分配和 skew/latency 控制 & 不应无依据声称 GCD 使用 H-tree 或 mesh \\
+8c：CCOpt/useful skew & 用 A/B 路径理解时钟与数据路径协同 & 配置本身不证明启用了特定 CCOpt 策略 \\
+8d：EDA 中的 CTS & clock tracing、 sinks、buffer 列表和约束预算 & GCD 没有复杂宏或 generated-clock 特例 \\
+8e：Clock Routing/Analysis & MET4--MET5 及 CTS QoR、后续 RCX/STA & CTS 估计不等于最终 signoff \\
+8f--8g：Clock Generation/CDC & 可作为工具链处理其他设计时的背景 & 当前 GCD 内部没有这些实例 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+这种对应关系避免两种误解：一是只讲抽象定义而不接触项目；二是把课件中的所有结构都虚构到简单 GCD 示例里。
+
+\section{项目专用 CTS Checklist}
+
+以下清单描述应该检查什么，不代表本文已经读取某次运行结果。
+
+\subsection{设计与约束输入}
+
+\begin{itemize}[leftmargin=2em]
+  \item[$\square$] 明确当前上下文是 10 ns 文档示例还是 20 ns 原生 fixture。
+  \item[$\square$] 确认 top 为 \code{gcd}、clock root 为 \code{clk}。
+  \item[$\square$] 确认预期 sinks 为 2 个 FSM bits、16 个 A bits 和 16 个 B bits，共 34 个。
+  \item[$\square$] 确认 clock tracing 能识别 \code{clk}，不存在意外生成的第二时钟域。
+  \item[$\square$] 确认四种 ICS55 clock buffers 可用，MET4--MET5 与 PDK 配置一致。
+  \item[$\square$] 检查 80 ps skew、transition、capacitance、fanout 和零 root slew 假设的适用性。
+  \item[$\square$] 区分 JSON 配置预算与 SDC 最终生效的电气约束。
+  \item[$\square$] 确认 pre-CTS/post-CTS 约束选择与流程位置一致。
+  \item[$\square$] 不把同步 \code{reset} 随意声明为 false path；它是 FSM 状态寄存器的数据输入。
+  \item[$\square$] 不仅凭“GCD 是迭代算法”就给 A/B 路径添加 multicycle exception。
+  \item[$\square$] 不虚构 SRAM、ICG、PLL 或内部 CDC 检查项；外部接口同步假设另行确认。
+\end{itemize}
+
+\subsection{CTS 步骤应提供的证据}
+
+\begin{itemize}[leftmargin=2em]
+  \item[$\square$] 所有预期 sinks 保持在同一时钟网络上，没有遗漏或意外断开的 CK。
+  \item[$\square$] Optimized skew 与 0.08 ns 目标比较，且 skew-target-unmet 计数为零。
+  \item[$\square$] 检查最小/最大 insertion latency 和 clock tree level，识别异常分支。
+  \item[$\square$] 检查每条路径的最小/最大 buffer 数、总 buffer 数和 buffer area。
+  \item[$\square$] 检查 clock wirelength，避免为追求 skew 造成不合理的树资源开销。
+  \item[$\square$] 用实际分析数据检查 transition、capacitance 和 fanout；配置预算不能替代测量。
+  \item[$\square$] 在 propagated clocks 下分析 A/B、FSM 控制以及 request/response 接口的 setup 和 hold。
+  \item[$\square$] 保留 setup/hold uncertainty，并检查生成的 IO 预算是否符合真实外部接口。
+\end{itemize}
+
+\path{chipcompiler/tools/ecc/metrics.py}:663--674 当前定义的 CTS 指标包括：
+\begin{itemize}
+  \item \code{cts_buffer_count}、\code{cts_buffer_area}；
+  \item \code{clock_path_max_buffer}、\code{clock_path_min_buffer}；
+  \item \code{clock_wirelength}、\code{cts_clock_wirelength_max}；
+  \item \code{cts_clock_tree_max_level}；
+  \item \code{cts_worst_optimized_skew_ns}；
+  \item \code{cts_worst_max_insertion_latency_ns}；
+  \item \code{cts_skew_target_unmet_count}。
+\end{itemize}
+
+需要注意，\path{chipcompiler/tools/ecc/checklist.py}:181--270 中 \code{EccCtsChecklist.check()} 当前在 183 行直接返回 \code{refresh_step_checklist(...)}，后面的详细检查代码不可达。并且后续源码本身也说明当前 CTS V3 analysis 不发射实测 clock transition/capacitance 数据。因此，不能把该函数的布尔结果理解为所有电气项目都已经被独立验证。
+
+\subsection{后续物理实现与 signoff}
+
+\begin{itemize}[leftmargin=2em]
+  \item[$\square$] Legalization 后重新检查时钟连接、skew、latency 和电气约束。
+  \item[$\square$] Routing 后确认实际时钟拓扑与布线结果，而不是沿用 CTS 估计。
+  \item[$\square$] RCX 后基于提取寄生参数执行最终 STA。
+  \item[$\square$] 按 \code{sta_ecc.json} 声明的 corner/SPEF 组合完成 signoff，而不是只看 TYP。
+  \item[$\square$] 保留 CTS log、输出 netlist/DEF、QoR、最终 STA/DRV 和物理验证报告作为证据链。
+  \item[$\square$] 确认功能语义未被改变：FSM 状态同步复位，A/B 寄存器没有功能复位。
+\end{itemize}
+
+\section{CI 流水所表达的质量门}
+
+\subsection{流水触发与测试层次}
+
+\path{.github/workflows/ci.yml} 定义了 main/release 分支 push、相关路径 pull request、定时任务和手工触发。本文只分析流水结构，不查询某次 GitHub Actions 状态。
+
+主要质量门如下：
+\begin{center}
+\begin{tabularx}{\textwidth}{p{0.27\textwidth}X}
+\toprule
+Job & 在项目中承担的作用 \\
+\midrule
+\code{test} & 运行主项目及 agent 的 Pytest；失败时上传 integration flow logs \\
+\code{build-pyinstaller} & 验证原生工具导入并构建可分发的 ECC CLI bundle \\
+\code{e2e-designs} & 从指定 designs 来源生成 E2E 设计矩阵 \\
+\code{e2e-packaged-flow} & 用打包后的 CLI 执行设计流，导出 signoff package 并运行 Lit 产物检查 \\
+\code{signoff-csv} & 汇总各设计的 signoff CSV 证据和摘要 \\
+\code{nix-build} & 执行 \code{nix flake check -L}，检查完整 flake 构建 \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+对应定义见 \path{.github/workflows/ci.yml}:149--256、258--299、707--923、924--995、1035--1060。
+
+E2E 步骤不仅“运行到结束”，还要求导出 signoff package，并检查 \code{run_manifest.json} 和 \code{metrics.check.txt} 等产物，随后执行 Lit checks。失败时可上传工作区，signoff CSV artifacts 则用于后续汇总。这说明项目验收强调可复现的产物和结构化质量门，而不是一张孤立的 CTS 截图。
+
+设计矩阵由外部 designs 配置生成，当前流水还明确排除了 \code{xtea}，见 \path{.github/workflows/ci.yml}:756--771。因此“运行设计矩阵”也不应被描述为不加筛选地运行所有可能设计。
+
+\subsection{CI 与 CTS 原理的关系}
+
+CI 可以证明既定版本、依赖和设计矩阵下的自动化质量门是否通过，但不能替代对 CTS 原理的理解：
+\begin{itemize}
+  \item skew 达标不自动意味着所有 setup/hold 路径达标；
+  \item buffer tree 建立成功不自动意味着 post-route clock 仍满足约束；
+  \item 单个 GCD 示例通过不代表所有设计都有相同的 clock topology；
+  \item 实际 CI 状态和 artifacts 应通过 GitHub CLI 另行读取，本文不预设其结果。
+\end{itemize}
+
+\section{总结}
+
+对当前 ECC 项目，GCD 示例中的 CTS 可以准确概括为：
+\begin{quote}
+在 placement 提供的物理位置上，把单个高扇出 \code{clk} 转换为连接 FSM、A 和 B 共 34 个寄存器的 buffer tree；控制 skew、insertion latency 和电气约束，并在 legalization、routing、RCX 和最终 STA 后重新建立时序证据。
+\end{quote}
+
+它的目标不是单纯得到一棵视觉上对称的树，也不是只让 global skew 数字变小，而是在不修改 GCD 功能的前提下，使真实物理时钟网络支持数据通路可靠工作，并由 ECC 的 signoff 产物和 CI 质量门验证整个流程。
+
+\section*{参考资料}
+\begin{enumerate}
+  \item ECOS Chip Compiler 仓库：\path{/home/kernel_dev/w/ecc}，本文引用的 RTL、Python 配置、ECC-Tools 源码和 GitHub Actions 流水。
+  \item ENICS Labs, \emph{Digital VLSI Design --- English}, Lecture 8, Sections 8a--8g.\\
+  \url{https://enicslabs.com/academic-courses/dvd-english/}
+\end{enumerate}
+
+\end{document}
