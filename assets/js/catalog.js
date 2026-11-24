@@ -107,6 +107,18 @@ window.PORTFOLIO_CATALOG = {
       ],
     },
     {
+      id: "razavi-delay-locked-loop",
+      category: "microelectronics",
+      title: "The Delay-Locked Loop [A Circuit for All Seasons]",
+      titleEn: "The Delay-Locked Loop [A Circuit for All Seasons]",
+      summary:
+        "Behzad Razavi 在 IEEE Solid-State Circuits Magazine 的 DLL 教程：延迟锁定环的结构、锁定范围及其在时钟系统中的作用。",
+      tags: ["DLL", "clocking", "Razavi"],
+      files: [
+        { label: "PDF", href: "assets/library/papers/microelectronics/BR_SSCM_3_2018.pdf" },
+      ],
+    },
+    {
       id: "nix-eda-toolchain",
       category: "nix",
       title: "Nix EDA 工具链",
